@@ -192,8 +192,19 @@ export function createCity(random) {
       if (dd < d) { d = dd; tSy = sy; }
     }
     const points = [{ x: start.x, y: start.y }];
-    if (Math.abs(start.x - tAx) > 4) points.push({ x: tAx, y: start.y });
-    if (Math.abs(start.y - tSy) > 4) points.push({ x: tAx, y: tSy });
+    // The start sits on one road: if it is an avenue, drive along it to the
+    // target street first; if it is a street, drive along it to the target
+    // avenue first. Either way every leg stays on a road centreline. The old
+    // code always went along the start's y, which cuts straight through
+    // building blocks whenever the start is on an avenue.
+    const onAvenue = AVENUES.includes(start.x) && !STREETS.includes(start.y);
+    if (onAvenue) {
+      if (Math.abs(start.y - tSy) > 4) points.push({ x: start.x, y: tSy });
+      if (Math.abs(start.x - tAx) > 4) points.push({ x: tAx, y: tSy });
+    } else {
+      if (Math.abs(start.x - tAx) > 4) points.push({ x: tAx, y: start.y });
+      if (Math.abs(start.y - tSy) > 4) points.push({ x: tAx, y: tSy });
+    }
     points.push({ x: tx, y: ty });
     return points;
   }

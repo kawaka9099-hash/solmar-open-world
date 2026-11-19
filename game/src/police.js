@@ -16,7 +16,10 @@ export function createPolice(city, random) {
   }
 
   function spawnPoliceCar(state) {
-    const p = city.randomRoadPoint(random, state.player.x, state.player.y, 420);
+    // Spawn far enough out that the player has a real chance to get moving:
+    // a carjacked car starts slow, and a cop spawning on top of it rams the
+    // car to pieces before the player ever reaches speed.
+    const p = city.randomRoadPoint(random, state.player.x, state.player.y, 700);
     const car = makeCar(random, p.x, p.y, 0, { kind: 'police', occupied: true, color: '#f5f5f5' });
     car.sirenPhase = random() * Math.PI * 2;
     police.push(car);
@@ -53,8 +56,13 @@ export function createPolice(city, random) {
     while (police.length > target) police.pop();
 
     // Wanted decay: quiet + unseen for a while, then one star at a time.
+    // "Seen" means a police car is actually close (250px) — at the old
+    // 420px a patrol car on the far side of a building still counted as
+    // seeing the player, so the quiet timer never accumulated on a ring
+    // route where a cop is always within 420px somewhere, and three stars
+    // could never decay no matter how well the player drove.
     const near = nearestPolice(player.x, player.y);
-    const seen = near && near.dist < 420;
+    const seen = near && near.dist < 250;
     if (state.wanted > 0 && !seen) {
       quietTimer += dt;
       if (quietTimer > WANTED.decayQuietSeconds) {
@@ -69,7 +77,13 @@ export function createPolice(city, random) {
         }
       }
     } else {
-      quietTimer = 0;
+      // A brief sighting costs quiet time but does not wipe it out entirely.
+      // The heat dies down if the player is mostly out of sight: a single
+      // corner encounter, where the police close in for a second or two,
+      // should not reset 25 seconds of clean driving — otherwise no route
+      // with a turn in it can ever lose the cops, and the mission is
+      // unwinnable by driving.
+      quietTimer = Math.max(0, quietTimer - dt * 2);
       decayTimer = 0;
     }
 
@@ -86,7 +100,24 @@ export function createPolice(city, random) {
       const steer = Math.max(-1, Math.min(1, diff * 2.2));
       const throttle = dist > 90 ? 1 : 0.4;
       stepCarPhysics(car, throttle, steer, false, dt);
-      city.resolveCircle(car, CAR.radius);
+      // A patrol car is slower than a getaway car (WANTED.policeMaxSpeed).
+      if (car.speed > WANTED.policeMaxSpeed) car.speed = WANTED.policeMaxSpeed;
+      const scrape = city.resolveCircle(car, CAR.radius);
+      if (scrape) {
+        // Crashed into a building while cutting a corner: a patrol car that
+        // drives straight through a block is crashing into it, not brushing
+        // it. This is the police's real weakness — they steer straight at the
+        // player with no pathfinding, so a 90-degree turn around a block
+        // leaves them buried in the wall while the player drives away. The
+        // cut is harsh and the cooldown short, so a car pressed against a
+        // wall stays slow instead of re-accelerating between cuts.
+        const hitSpeed = Math.abs(car.speed);
+        car.scrapeCooldown = Math.max(0, (car.scrapeCooldown || 0) - dt);
+        if (hitSpeed > 200 && car.scrapeCooldown <= 0) {
+          car.scrapeCooldown = 0.3;
+          car.speed *= 0.15;
+        }
+      }
       // Ram: shove the player's car, or hurt the player on foot. The speed cut
       // only lands on impact (cooldown-gated) so a cop glued to the bumper
       // cannot pin the player's speed to zero.
@@ -103,17 +134,21 @@ export function createPolice(city, random) {
           if (car.ramCooldown <= 0) {
             car.ramCooldown = 0.6;
             player.car.speed *= 0.82;
-            player.car.health -= 4;
+            player.car.health -= 2;
           }
-          player.car.health -= 6 * dt;
+          player.car.health -= 3 * dt;
           if (player.car.health <= 0 && player.car.smoke === 0) {
             player.car.smoke = 1;
             state.message = 'Your car is wrecked — get out!';
             state.messageTimer = 3;
           }
         } else {
-          player.health -= 14 * dt;
-          player.lastDamage = state.elapsed;
+          // On foot the cop shoves the player but does not hurt them: the
+          // consequence of being caught on foot is the bust (3s sitting on
+          // the player), not being run down. At 14/s the player was wasted
+          // in ~7s of contact while the bust timer — which needs a steady
+          // 3s under 46px — kept resetting as the shove pushed them apart,
+          // so a busted was unreachable and every foot chase ended wasted.
           player.x += (dx / dist) * 60 * dt;
           player.y += (dy / dist) * 60 * dt;
           city.resolveCircle(player, 11);

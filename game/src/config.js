@@ -38,7 +38,13 @@ export const CAR = {
   radius: 15,
   length: 46,
   width: 22,
-  health: 100,
+  // Sturdy enough to survive a chase: at 100 the car was wrecked by the
+  // rams and scrapes of a single 37-second escape, so losing the cops was
+  // decided by the health bar rather than the driving. At 150 it still
+  // died on the fourth lap of a two-star escape — the southwest corner,
+  // where the player must slow to turn, costs ~35 health a lap in rams
+  // and scrapes. 200 gives the margin to finish the escape.
+  health: 200,
 };
 
 export const TRAFFIC = { count: 22, speed: 150, speedJitter: 45, followGap: 58 };
@@ -51,6 +57,14 @@ export const WANTED = {
   // How many police cars are out at each wanted level.
   policePerStar: [0, 1, 2, 3, 4, 5],
   bustSeconds: 3,
+  // A getaway car is faster than a patrol car: on a clean straight the player
+  // gains ~200px/s, so a well-driven escape opens the gap and the heat can
+  // die down. At equal top speed the player could only ever hold the gap, and
+  // one bad corner lost the chase for good. The gap is wide on purpose: the
+  // police cut straight across the map (no pathfinding), so their route is
+  // shorter than the player's road route and their effective speed is higher
+  // than the cap alone suggests.
+  policeMaxSpeed: 350,
 };
 
 export const COMBAT = {

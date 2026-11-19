@@ -225,11 +225,105 @@ export function createEntities(city, random) {
         ped.target = city.randomSidewalkPoint(random);
         continue;
       }
-      ped.x += (dx / d) * ped.speed * dt;
-      ped.y += (dy / d) * ped.speed * dt;
+      // Sidestep: a pedestrian a car is bearing down on gets out of its
+      // path, whether they are on the road or on the sidewalk. A car that
+      // mounts the sidewalk at a corner should not mow down a pedestrian
+      // who could have stepped aside — the player eats a wanted star for a
+      // hit they could not have avoided, and the star makes the escape
+      // that follows unwinnable. The ped steps directly away from the
+      // car's line of travel (the component of their offset from the car
+      // that is perpendicular to the car's heading).
+      const threat = closeThreat(ped);
+      if (threat) {
+        const s = threat.speed >= 0 ? 1 : -1;
+        const dirX = Math.cos(threat.angle) * s;
+        const dirY = Math.sin(threat.angle) * s;
+        const rx = ped.x - threat.x;
+        const ry = ped.y - threat.y;
+        const along = rx * dirX + ry * dirY;
+        let px = rx - along * dirX;
+        let py = ry - along * dirY;
+        let plen = Math.hypot(px, py);
+        if (plen < 1) {
+          // Ped is on the car's line: pick either side.
+          px = -dirY;
+          py = dirX;
+          plen = 1;
+        }
+        ped.x += (px / plen) * ped.speed * 4 * dt;
+        ped.y += (py / plen) * ped.speed * 4 * dt;
+        ped.angle = Math.atan2(py / plen, px / plen);
+        city.resolveCircle(ped, 9);
+        continue;
+      }
+      const nx = ped.x + (dx / d) * ped.speed * dt;
+      const ny = ped.y + (dy / d) * ped.speed * dt;
+      // Look both ways: a pedestrian about to step off the curb onto the road
+      // waits if a car is coming. Otherwise they step out in front of a car
+      // at full speed and the player eats a wanted star for a hit they could
+      // not have avoided. Peds already on the road keep walking to clear it —
+      // and hurry across if a car is bearing down on them, since a car that
+      // accelerates after they commit can otherwise catch them mid-crossing.
+      if (!city.onRoad(ped.x, ped.y) && city.onRoad(nx, ny) && carComing(ped)) {
+        continue;
+      }
+      if (city.onRoad(ped.x, ped.y) && carComing(ped)) {
+        ped.x += (dx / d) * ped.speed * 4 * dt;
+        ped.y += (dy / d) * ped.speed * 4 * dt;
+      } else {
+        ped.x = nx;
+        ped.y = ny;
+      }
       ped.angle = Math.atan2(dy, dx);
       city.resolveCircle(ped, 9);
     }
+  }
+
+  /** Is a car about to reach this pedestrian's crossing? */
+  function carComing(ped) {
+    for (const car of cars) {
+      const spd = Math.abs(car.speed);
+      if (spd < 20) continue;
+      const s = car.speed >= 0 ? 1 : -1;
+      const dirX = Math.cos(car.angle) * s;
+      const dirY = Math.sin(car.angle) * s;
+      const rx = ped.x - car.x;
+      const ry = ped.y - car.y;
+      const along = rx * dirX + ry * dirY;
+      if (along <= 0) continue; // moving away from the pedestrian
+      const lateral = Math.abs(rx * dirY - ry * dirX);
+      if (lateral > 70) continue; // will pass to the side
+      // Reaches the crossing before the ped (52px/s over a 72px road, longer
+      // on a diagonal) clears it. Judge by the car's top-end speed, not just
+      // its current speed: a car that accelerates after the ped commits can
+      // otherwise catch them mid-crossing.
+      const judge = Math.max(spd, 300);
+      if (along / judge < 3.0) return true;
+    }
+    return false;
+  }
+
+  /**
+   * A car close enough that the pedestrian must sidestep now or be hit:
+   * heading toward them, within 250px along its path, and close enough
+   * laterally that it will not pass to the side. Returns the car, or null.
+   */
+  function closeThreat(ped) {
+    for (const car of cars) {
+      const spd = Math.abs(car.speed);
+      if (spd < 20) continue;
+      const s = car.speed >= 0 ? 1 : -1;
+      const dirX = Math.cos(car.angle) * s;
+      const dirY = Math.sin(car.angle) * s;
+      const rx = ped.x - car.x;
+      const ry = ped.y - car.y;
+      const along = rx * dirX + ry * dirY;
+      if (along <= 0 || along > 250) continue;
+      const lateral = Math.abs(rx * dirY - ry * dirX);
+      if (lateral > 70) continue;
+      return car;
+    }
+    return null;
   }
 
   function scarePeds(x, y) {

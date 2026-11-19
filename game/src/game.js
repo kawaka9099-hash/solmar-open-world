@@ -182,7 +182,10 @@ export function createGame(seed) {
     // Driving or walking.
     if (p.car) {
       const car = p.car;
-      const throttle = (input.up ? 1 : 0) + (input.down ? -1 : 0);
+      // A wrecked car is dead: no throttle, so it coasts to a stop and the
+      // wreck check below forces the player out. Without this, holding W
+      // overpowered the wreck drag and a car at negative health kept crawling.
+      const throttle = car.health <= 0 ? 0 : (input.up ? 1 : 0) + (input.down ? -1 : 0);
       const steer = (input.left ? -1 : 0) + (input.right ? 1 : 0);
       const before = { x: car.x, y: car.y };
       stepCarPhysics(car, throttle, steer, input.handbrake, dt);
