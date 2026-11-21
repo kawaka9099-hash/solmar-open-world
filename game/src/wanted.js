@@ -1,21 +1,26 @@
 // Solmar — game/src/wanted.js
-// The wanted level and the police who answer it. Crimes add points, the
-// stars decay once the player has been quiet and unseen for a while, and
-// the Solmar PD sends patrol cars in proportion to the heat: they chase,
-// ram, and — when the player is on foot and cornered — make the bust.
+// Heat and the police who answer it. Crimes push the star level up; stay
+// quiet and unseen and it fades. The department sends patrol cars to match
+// the heat — they chase the player, ram a getaway car, and run down or
+// corner someone on foot. A cornered player gets busted.
 //
-// driveToward is also the steering helper the traffic in the main loop
-// uses: given a car and a target point it returns the arcade controls
-// (throttle / steer / brake) that point the car at the target.
+// The bust clock is a single clock for the whole frame, not one per car:
+// it runs while any cruiser is within arm's reach on foot, and drains while
+// none is. (A per-car clock can never fill when two cruisers are out — the
+// far one's drain erases the near one's gain every frame.)
+//
+// driveToward is shared with the traffic in the main loop: given a car and
+// a point, it returns the arcade controls (throttle / steer / brake) that
+// aim the car at the point.
 
 import { CONFIG } from './config.js';
 import { clamp, angleDiff, makeRng } from './util.js';
 import { createCar, carWorldPos, updateCar } from './vehicles.js';
 
-// Arcade controls that steer `car` toward the point (tx, tz). The car
-// physics reads positive steer as a heading decrease (a right turn), so
-// a target sitting at a larger heading than the car's needs negative
-// steer: the sign here is the opposite of the raw heading difference.
+// Arcade steering toward (tx, tz). The car physics reads a positive steer
+// as a heading decrease (a right turn), so a target at a larger heading
+// than the car's needs a negative steer — the sign here is flipped from
+// the raw heading difference.
 export function driveToward(car, tx, tz) {
   const px = car.group.position.x;
   const pz = car.group.position.z;
@@ -37,7 +42,7 @@ export class WantedSystem {
   constructor(ctx) {
     this.ctx = ctx;
     this.stars = 0; // float, 0..5; the HUD rounds it
-    this.police = []; // police cars currently on the hunt
+    this.police = []; // patrol cars currently on the hunt
     this.bustTimer = 0;
     this.lastCrimeAt = -999;
     this.time = 0;
@@ -80,14 +85,15 @@ export class WantedSystem {
     const playerPos = ctx.player.pos;
     const driving = ctx.driving.car;
 
-    // Heat fades when the player has been quiet and no cruiser is near.
+    // Heat fades once the player has been quiet a while and no cruiser
+    // is anywhere near.
     const nearestCop = this._nearestPoliceDistance(playerPos);
     if (this.stars > 0 && this.time - this.lastCrimeAt > 10 && nearestCop > 70) {
       this.stars = Math.max(0, this.stars - CONFIG.wanted.decayPerSecond * dt);
       if (this.stars < 0.05) this.stars = 0;
     }
 
-    // Match the number of patrol cars to the heat.
+    // Match the patrol count to the heat.
     const wantedCount = CONFIG.wanted.policeResponse[clamp(Math.floor(this.stars), 0, 5)] || 0;
     if (this.police.length < wantedCount && this._spawnCooldown <= 0) {
       this._spawnPolice(playerPos);
@@ -107,11 +113,14 @@ export class WantedSystem {
       if (farthest) this._removeCar(farthest);
     }
 
-    // Every cruiser chases the player.
+    // Every cruiser chases the player. While the hunt runs, remember
+    // whether any cruiser has the player cornered on foot — the bust
+    // clock is judged once, after the loop, from that single fact.
     const target = driving ? carWorldPos(driving) : { x: playerPos.x, z: playerPos.z };
+    let cornered = false;
     for (const car of [...this.police]) {
       if (car.wrecked) {
-        // A wrecked cruiser is out of the hunt; leave the wreck on the street.
+        // A wrecked cruiser is out of the hunt; leave the wreck behind.
         this.police.splice(this.police.indexOf(car), 1);
         continue;
       }
@@ -125,7 +134,7 @@ export class WantedSystem {
       const distToPlayer = Math.hypot(p.x - playerPos.x, p.z - playerPos.z);
 
       if (driving) {
-        // Ramming the player's car: damage it on contact.
+        // Ramming the getaway car: damage it on contact.
         const carPos = carWorldPos(driving);
         const gap = Math.hypot(p.x - carPos.x, p.z - carPos.z);
         if (gap < 3.4) {
@@ -133,7 +142,22 @@ export class WantedSystem {
           if (Math.random() < dt * 2) this.ctx.sfx.crash(0.5);
         }
       } else if (distToPlayer < CONFIG.wanted.bustRadius) {
-        // Cornered on foot: the bust clock runs.
+        cornered = true;
+      } else if (distToPlayer < 3.2 && car.speed > 3) {
+        // Run down by a cruiser at speed.
+        if (this.time - (car._lastHitAt || -99) > 1) {
+          car._lastHitAt = this.time;
+          this.ctx.game.damagePlayer(12);
+          this.ctx.sfx.crash(0.6);
+        }
+      }
+    }
+
+    // One bust clock for the whole frame. While driving it holds still;
+    // on foot it fills while any cruiser is on top of the player and
+    // drains the moment the player breaks free.
+    if (!driving) {
+      if (cornered) {
         this.bustTimer += dt;
         if (!this._bustWarned) {
           this._bustWarned = true;
@@ -144,13 +168,6 @@ export class WantedSystem {
           this._bustWarned = false;
           this.ctx.game.busted();
           return;
-        }
-      } else if (distToPlayer < 3.2 && car.speed > 3) {
-        // Run down by a cruiser.
-        if (this.time - (car._lastHitAt || -99) > 1) {
-          car._lastHitAt = this.time;
-          this.ctx.game.damagePlayer(12);
-          this.ctx.sfx.crash(0.6);
         }
       } else {
         this.bustTimer = Math.max(0, this.bustTimer - dt * 2);

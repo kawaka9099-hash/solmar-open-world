@@ -1,9 +1,15 @@
 // Solmar — game/src/hud.js
-// Everything the player sees on top of the 3D view: the money/health/ammo
-// panel, the wanted stars, the mission card, the live minimap, toasts, the
-// crosshair, and the menu / pause / busted / wasted screens. It only talks
-// to the DOM — the game hands it one plain "view" object per frame and it
-// paints that, so no game logic lives here.
+// Everything drawn on top of the 3D view: the money/health/ammo panel, the
+// wanted stars, the mission card, the live minimap, toasts, the crosshair,
+// and the menu / pause / busted / wasted screens. It only talks to the DOM
+// — the game hands it one plain "view" object per frame and it paints that,
+// so no game logic lives here.
+//
+// Visibility is set with explicit display values, never with an empty
+// string: the stylesheet hides the toast, the crosshair and the pause /
+// busted / wasted screens with ID selectors, and an empty inline display
+// falls back to those rules — the element would stay hidden. An inline
+// 'flex' or 'block' outranks the ID rule and actually shows it.
 //
 // The minimap is a top-down drawing of the city: road lines, the marina
 // water at the south edge, landmark dots, the player as a white arrow, the
@@ -44,7 +50,9 @@ export class HUD {
     if (this.toastEl) this.toastEl.style.opacity = '0';
   }
 
-  // Which overlay screen is showing. 'playing' hides them all.
+  // Which overlay screen is showing. 'playing' hides them all. The
+  // overlays are flex containers, so the visible one gets 'flex' — an
+  // empty value would lose to the stylesheet's ID rule that hides them.
   showScreen(name) {
     const screens = {
       menu: this.startScreenEl,
@@ -53,7 +61,7 @@ export class HUD {
       wasted: this.wastedScreenEl,
     };
     for (const [key, node] of Object.entries(screens)) {
-      if (node) node.style.display = key === name ? '' : 'none';
+      if (node) node.style.display = key === name ? 'flex' : 'none';
     }
   }
 
@@ -64,7 +72,7 @@ export class HUD {
   showToast(text, ms = 3600) {
     if (!this.toastEl) return;
     this.toastEl.textContent = text;
-    this.toastEl.style.display = '';
+    this.toastEl.style.display = 'block';
     this.toastEl.style.opacity = '1';
     window.clearTimeout(this._toastTimer);
     this._toastTimer = window.setTimeout(() => {
@@ -107,7 +115,7 @@ export class HUD {
       this.wantedPanelEl.style.opacity = view.wantedStars > 0 ? '1' : '0.55';
     }
     if (this.crosshairEl) {
-      this.crosshairEl.style.display = view.crosshairVisible ? '' : 'none';
+      this.crosshairEl.style.display = view.crosshairVisible ? 'block' : 'none';
     }
     if (view.mission) {
       if (this.missionTitleEl) this.missionTitleEl.textContent = view.mission.title;
@@ -118,12 +126,12 @@ export class HUD {
             ? formatDistance(view.mission.distance)
             : '';
       }
-      if (this.missionCardEl) this.missionCardEl.style.display = '';
+      if (this.missionCardEl) this.missionCardEl.style.display = 'block';
     } else {
       if (this.missionTitleEl) this.missionTitleEl.textContent = 'FREE ROAM — SOLMAR';
       if (this.missionObjectiveEl) this.missionObjectiveEl.textContent = view.freeRoamHint;
       if (this.missionDistanceEl) this.missionDistanceEl.textContent = '';
-      if (this.missionCardEl) this.missionCardEl.style.display = '';
+      if (this.missionCardEl) this.missionCardEl.style.display = 'block';
     }
     this._drawMinimap(view);
   }
