@@ -1,79 +1,94 @@
 // Solmar — game/src/shots.js
-// Screenshots: a helper that dumps the live canvas to a PNG (F9), and the
-// staged setups behind the `?shot=` URL parameter, so the dossier shots
-// are reproducible: `?shot=street`, `?shot=mission`, `?shot=drive` and
-// `?shot=chase` each put the game in a fixed, seeded state before the
-// picture is taken. `?shot=start` leaves the title screen up.
-//
-// The helper never touches the game files: it drives the same public
-// hooks the game itself uses (start, teleport, enter a car, start a
-// mission, set the wanted level).
+// Screenshot capture (F9) and the staged ?shot= setups the dossier shots
+// use. A staging puts the game straight into a fixed, deterministic
+// situation — same positions every run — so the screenshots are
+// reproducible renders of the game's own code, never composites.
 
-import { nearestCar } from './vehicles.js';
+export function capture(renderer, name = 'shot') {
+  const url = renderer.domElement.toDataURL('image/png');
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `${name}.png`;
+  a.click();
+}
 
-export class ShotsHelper {
-  constructor(ctx) {
-    this.ctx = ctx;
-  }
+// api: { game, missions, wanted, player, THREE } — everything a staging
+// needs, all of it already built by main.js.
+export function applyShotStaging(name, api) {
+  const { game, missions, wanted, player } = api;
+  const city = game.city;
+  const spawn = city.landmarks.spawn;
+  const marina = city.landmarks.marina;
 
-  // Save the current frame as a PNG download. Renders one fresh frame
-  // first so toDataURL reads live pixels without preserveDrawingBuffer.
-  capture(name) {
-    const ctx = this.ctx;
-    if (ctx.renderFrame) ctx.renderFrame();
-    const canvas = ctx.renderer.domElement;
-    const url = canvas.toDataURL('image/png');
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = (name || 'solmar-shot') + '.png';
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    return url;
-  }
-
-  // Put the game in a fixed scene for a screenshot. Called once after
-  // boot when the page carries ?shot=<name>.
-  stage(name) {
-    const ctx = this.ctx;
-    const game = ctx.game;
-    if (!game) return false;
-    if (name === 'start') return true; // title screen, nothing to stage
+  const startPlaying = () => {
     if (game.phase === 'menu') game.start();
-
-    const teleport = (x, z) => {
-      ctx.player.pos.set(x, 0, z);
-      ctx.player.group.position.copy(ctx.player.pos);
-      ctx.player.heading = 0;
-    };
-
-    if (name === 'street') {
-      // On foot on a busy road near the spawn, traffic rolling past.
-      const spawn = ctx.city.landmarks.spawn;
-      teleport(spawn.x, spawn.z + 30);
-      return true;
+  };
+  const putPlayerInCar = () => {
+    // Prefer a car already travelling along Z (heading near 0 or PI), so
+    // the staged drive runs down a road instead of into a building.
+    let best = null;
+    let bestScore = Infinity;
+    for (const car of game.cars) {
+      if (car.wrecked) continue;
+      const d = Math.hypot(car.group.position.x - player.pos.x, car.group.position.z - player.pos.z);
+      const alongZ = Math.abs(Math.sin(car.heading));
+      const score = d + (alongZ < 0.3 ? 0 : 500);
+      if (score < bestScore) { bestScore = score; best = car; }
     }
-    if (name === 'mission') {
-      // M1 in progress: Daz at the client meeting point.
-      game.missions.startMission(0);
-      const spawn = ctx.city.landmarks.spawn;
-      teleport(spawn.x + 14, spawn.z - 8);
-      return true;
+    if (!best) return null;
+    player.pos.set(best.group.position.x + 2, 0, best.group.position.z);
+    player.group.position.copy(player.pos);
+    game.ctx.driving.car = best;
+    best.driver = 'player';
+    const ti = game.traffic.indexOf(best);
+    if (ti >= 0) game.traffic.splice(ti, 1);
+    player.group.visible = false;
+    game.hud.setCrosshair(false);
+    // Face down the road it sits on.
+    best.heading = Math.abs(Math.sin(best.heading)) < 0.3
+      ? (Math.cos(best.heading) >= 0 ? 0 : Math.PI)
+      : best.heading;
+    return best;
+  };
+
+  switch (name) {
+    case 'street': {
+      startPlaying();
+      player.pos.set(spawn.x + 18, 0, spawn.z - 12);
+      player.group.position.copy(player.pos);
+      game.camYaw = Math.PI;
+      break;
     }
-    if (name === 'drive' || name === 'chase') {
-      // Behind the wheel on a road. The nearest car can be anywhere in
-      // the city, so walk the player over to it first.
-      const car = nearestCar(ctx.cars, ctx.player.pos.x, ctx.player.pos.z, 400);
+    case 'mission': {
+      startPlaying();
+      missions.startMission(0);
+      player.pos.set(spawn.x + 18, 0, spawn.z - 12);
+      player.group.position.copy(player.pos);
+      game.camYaw = Math.PI;
+      break;
+    }
+    case 'drive': {
+      startPlaying();
+      const car = putPlayerInCar();
       if (car) {
-        teleport(car.group.position.x + 2, car.group.position.z);
-        ctx.enterCar(car);
+        car.speed = 12;
+        game.camYaw = car.heading;
       }
-      if (name === 'chase') {
-        // A three-star getaway: driving, cruisers closing in.
-        game.wanted.setStars(3);
-      }
-      return true;
+      break;
     }
-    return false;
+    case 'chase': {
+      startPlaying();
+      const car = putPlayerInCar();
+      if (car) {
+        car.speed = 14;
+        game.camYaw = car.heading;
+      }
+      wanted.setStars(3, game.time);
+      break;
+    }
+    case 'start':
+    default:
+      // The start screen itself.
+      break;
   }
 }

@@ -1,96 +1,77 @@
-# Solmar — an open-world crime game in the browser
+# Solmar — an open-world crime game
 
-Solmar is a complete, original open-world crime game that runs offline
-from its own static files in a desktop browser. No Rockstar names, maps,
-characters or assets: the city, the people, the cars, the story, the art
-and the sound are all built from scratch in code.
+You are Dario "Daz" Ferran, a driver fresh out of the marina lock-up with
+$50 and a borrowed pistol. The city of Solmar is yours: five districts, a
+working waterfront, traffic, pedestrians, and the Solmar Police Department
+watching everything you do. Take jobs from the fixer Lena, stay ahead of
+the law, and take back the ledger from the developer Viktor Hale.
 
-You are Dario "Daz" Ferran, new in the sun-soaked city of Solmar and
-short on cash. Lena, a fixer, has work for you — six jobs, from driving
-a client to the marina to taking down Viktor Hale and recovering his
-ledger. Between jobs the city is yours: steal cars, outrun the Solmar
-PD, and mind the wanted stars.
+## How to play
 
-## What is in the game
+```
+node serve.ts
+```
 
-- **A city** — a procedural 5×5 grid with roads, sidewalks, a park, a
-  marina with docks and boats, a bank, a safehouse and a hospital.
-- **On foot and by car** — walk, sprint and jump, or steal any car on
-  the street and drive it with arcade physics, handbrake drifts included.
-- **Traffic and pedestrians** — cars cruise the roads, people stroll the
-  sidewalks and scatter when shots are fired.
-- **A wanted system and police** — crimes raise your heat from 1 to 5
-  stars; patrol cars chase, ram, and try to bust you on foot. Lay low
-  and the heat fades.
-- **Missions and a story** — six jobs from Lena with markers, objectives,
-  payouts and fail states, tracked on the HUD and the minimap.
-- **Combat** — a pistol (aim, shoot, reload) and a punch, against
-  armed thugs, guards and Hale himself.
-- **A HUD with a live minimap** — money, health, ammo, speed, wanted
-  stars, mission objectives and a top-down map of the city.
-- **A start screen and a save** — progress (cash, ammo, jobs done) is
-  kept in localStorage; closing the tab and coming back continues the story.
-- **Sound** — fully procedural WebAudio: engine hum, sirens, gunshots,
-  footsteps and a looping music bed. No audio files.
-
-## Controls
+Then open http://localhost:8080 in a desktop browser. No network, no
+build step — every file the game loads sits under `game/`.
 
 | Key | Action |
-| --- | --- |
+| --- | ------ |
 | WASD / arrows | Move / drive |
-| Mouse | Look (click the game to lock the pointer) |
-| Shift | Sprint |
-| Space | Jump / handbrake |
-| E | Enter or exit a car |
-| Click | Shoot |
+| Mouse | Look (click the game to capture the mouse) |
+| E | Enter or exit a car · start a job at the safehouse |
+| Click | Shoot the pistol |
 | F | Punch |
 | R | Reload |
-| M | Mute |
+| Shift | Sprint / handbrake while driving |
+| Space | Jump / brake |
 | P | Pause |
-| F9 | Save a screenshot (PNG download) |
+| M | Mute |
+| F9 | Save a PNG screenshot of the canvas |
 
-## Play it
+## The story — six jobs
 
-```sh
-node serve.ts        # game/ on http://localhost:8080
-```
+1. **The Pickup** ($250) — meet Lena's client and drive them to the marina.
+2. **Hot Wheels** ($600) — steal the sport car by the bank, deliver it to the docks.
+3. **Dockside Trouble** ($800) — clear Hale's thugs from the docks and bring the package home.
+4. **The Bank Job** ($900) — crack the bank safe, then lose a three-star manhunt.
+5. **Dead Drops** ($700) — three drops at the hospital, the marina and the docks.
+6. **The Ledger** ($900) — take down Hale and his guards, recover the ledger.
 
-Then open http://localhost:8080 in a desktop browser. The game needs
-no network: three.js is vendored under `game/vendor/`.
+Jobs unlock in order from the yellow marker at the safehouse. Getting
+busted or wasted fails the active job — you keep your money minus the
+fine (busted) or the hospital cut (wasted) and can try again.
 
-Staged screenshots for the dossier: open the game with
-`?shot=street`, `?shot=mission`, `?shot=drive` or `?shot=chase`
-(`?shot=start` leaves the title screen up).
+## The city
 
-## Build the dossier
+Stealing a car, shooting, or hitting a pedestrian raises your wanted
+level (1–5 stars). Police cruisers spawn, chase and ram; on foot, an
+officer standing next to you for a few seconds busts you. Lay low and the
+heat fades. Progress, cash and ammo save to the browser automatically.
 
-```sh
-mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
-```
+## Tech
 
-This copies `game/` and `screenshots/` to `out/` and writes
-`out/dossier.json` with the vendored make.fun library. It needs
-Node 22+ and no packages.
+- three.js r160 (vendored under `game/vendor/`), plain ES modules.
+- Procedural everything: the city, the car and character models, the
+  WebAudio sound effects and music bed. No external assets.
+- `main.ts` (Node 22, standard library only) copies `game/` and
+  `screenshots/` to `/output` and writes `dossier.json` with the vendored
+  `vendor/makefun-game.ts` library. Run it with
+  `MAKEFUN_OUTPUT_DIR=out node main.ts` and compare two runs: the bytes
+  are identical.
 
 ## Layout
 
-- `game/index.html` — the page and the HUD markup
-- `game/src/main.js` — boot, camera, movement, frame loop
-- `game/src/game.js` — state machine, traffic, pedestrians, HUD view
-- `game/src/missions.js` — the six story jobs
-- `game/src/wanted.js` — wanted level and police AI
-- `game/src/combat.js` — pistol, punch, enemies, pickups
-- `game/src/hud.js` — HUD, minimap, screens, toasts
-- `game/src/save.js` — localStorage save
-- `game/src/shots.js` — screenshot helper and staged shots
-- `game/src/config.js`, `util.js`, `input.js`, `audio.js`, `world.js`,
-  `vehicles.js`, `actors.js` — engine: tuning, helpers, input,
-  procedural sound, city, cars, people
-- `game/vendor/three.module.min.js` — three.js r160
-- `main.ts` — the entry program (copies game + screenshots, writes the dossier)
-- `serve.ts` — the local dev server
-- `vendor/makefun-game.ts` — the make.fun dossier library (unchanged)
-
-## License
-
-MIT. See LICENSE.
+- `game/index.html` — the page, HUD and import map.
+- `game/src/config.js` — every tuning constant in one place.
+- `game/src/world.js` — the procedural city (roads, marina, bank, safehouse, hospital).
+- `game/src/vehicles.js` — arcade car physics and boxy car models.
+- `game/src/actors.js` — the player character and pedestrians.
+- `game/src/game.js` — the state machine, main loop, traffic AI.
+- `game/src/missions.js` — the six story jobs.
+- `game/src/wanted.js` — wanted stars and police pursuit.
+- `game/src/combat.js` — pistol, fists, enemies, cash pickups.
+- `game/src/hud.js` — panels, toasts, screens and the live minimap.
+- `game/src/save.js` — versioned localStorage saves.
+- `game/src/shots.js` — F9 capture and staged `?shot=` setups.
+- `screenshots/` — four renders of the game itself (cover first).

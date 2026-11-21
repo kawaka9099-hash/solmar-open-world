@@ -1,237 +1,237 @@
 // Solmar — game/src/wanted.js
-// Heat and the police who answer it. Crimes push the star level up; stay
-// quiet and unseen and it fades. The department sends patrol cars to match
-// the heat — they chase the player, ram a getaway car, and run down or
-// corner someone on foot. A cornered player gets busted.
+// The wanted level and the Solmar Police response. Stars are a float that
+// crimes push up and quiet time wears down; each whole star brings more
+// patrol cruisers, and cruisers chase, ram and — when they corner the
+// player on foot — bust them.
 //
-// The bust clock is a single clock for the whole frame, not one per car:
-// it runs while any cruiser is within arm's reach on foot, and drains while
-// none is. (A per-car clock can never fill when two cruisers are out — the
-// far one's drain erases the near one's gain every frame.)
-//
-// driveToward is shared with the traffic in the main loop: given a car and
-// a point, it returns the arcade controls (throttle / steer / brake) that
-// aim the car at the point.
+// Two rules the previous build got wrong, fixed here by construction:
+//  * the bust clock is judged ONCE per frame from whether ANY cruiser has
+//    the player cornered. Per-cruiser add/subtract branches let far
+//    cruisers cancel the near one and the clock could never fill.
+//  * police spawn on a road line at least 50 m from the player, checked
+//    AFTER clamping into the city bounds (clamping first used to drop
+//    cruisers right on top of the player at the city edge).
 
 import { CONFIG } from './config.js';
 import { clamp, angleDiff, makeRng } from './util.js';
-import { createCar, carWorldPos, updateCar } from './vehicles.js';
-
-// Arcade steering toward (tx, tz). The car physics reads a positive steer
-// as a heading decrease (a right turn), so a target at a larger heading
-// than the car's needs a negative steer — the sign here is flipped from
-// the raw heading difference.
-export function driveToward(car, tx, tz) {
-  const px = car.group.position.x;
-  const pz = car.group.position.z;
-  const dx = tx - px;
-  const dz = tz - pz;
-  const dist = Math.hypot(dx, dz);
-  const desired = Math.atan2(dx, dz);
-  const diff = angleDiff(car.heading, desired);
-  const steer = clamp(-diff * 2.2, -1, 1);
-  let throttle = 0;
-  if (Math.abs(diff) < 0.6) throttle = 1;
-  else if (Math.abs(diff) < 1.5) throttle = 0.35;
-  if (dist < 12) throttle = Math.min(throttle, 0.4);
-  const brake = dist < 4;
-  return { throttle: brake ? 0 : throttle, steer, brake, handbrake: false };
-}
+import { createCar, updateCar } from './vehicles.js';
 
 export class WantedSystem {
-  constructor(ctx) {
-    this.ctx = ctx;
-    this.stars = 0; // float, 0..5; the HUD rounds it
-    this.police = []; // patrol cars currently on the hunt
+  constructor(scene, THREE, city, hooks = {}) {
+    this.scene = scene;
+    this.THREE = THREE;
+    this.city = city;
+    this.sfx = hooks.sfx ?? null;
+    this.onBusted = hooks.onBusted ?? (() => {});
+    this.onStarsChange = hooks.onStarsChange ?? (() => {});
+    this.rng = makeRng(0x5eed);
+    this.points = 0; // float stars; whole stars = Math.floor(points)
+    this.lastCrimeAt = -1e9;
     this.bustTimer = 0;
-    this.lastCrimeAt = -999;
-    this.time = 0;
-    this._spawnCooldown = 0;
-    this._rng = makeRng(CONFIG.city.seed + 77);
-    this._bustWarned = false;
+    this.police = []; // cruiser car objects (not in the traffic list)
+    this.spawnTimer = 0;
+    this._lastLevel = 0;
+  }
+
+  get stars() {
+    return Math.max(0, Math.min(CONFIG.wanted.maxStars, Math.floor(this.points)));
   }
 
   get level() {
-    return Math.round(this.stars);
+    return this.stars;
   }
 
-  addCrime(type) {
-    const points = CONFIG.wanted.crimePoints[type] ?? 1;
-    this.stars = Math.min(CONFIG.wanted.maxStars, this.stars + points);
-    this.lastCrimeAt = this.time;
+  addCrime(kind, now = 0) {
+    const table = CONFIG.wanted.crimePoints;
+    const pts = table[kind] ?? 1;
+    this.points = Math.min(CONFIG.wanted.maxStars, this.points + pts);
+    this.lastCrimeAt = now;
+    this._syncLevel();
   }
 
-  setStars(n) {
-    this.stars = clamp(n, 0, CONFIG.wanted.maxStars);
-    this.lastCrimeAt = this.time;
+  // Test / scripted hook (the bank job jumps straight to 3 stars).
+  setStars(n, now = 0) {
+    this.points = clamp(n, 0, CONFIG.wanted.maxStars);
+    this.lastCrimeAt = now;
+    this._syncLevel();
   }
 
-  clear() {
-    this.stars = 0;
+  clearAll() {
+    this.points = 0;
     this.bustTimer = 0;
-    this._bustWarned = false;
-    for (const car of this.police) this._removeCar(car);
-    this.police = [];
+    this._removeAllPolice();
+    this._syncLevel();
   }
 
-  policePositions() {
-    return this.police.map((car) => carWorldPos(car));
+  _syncLevel() {
+    const level = this.stars;
+    if (level !== this._lastLevel) {
+      this._lastLevel = level;
+      this.onStarsChange(level);
+      if (this.sfx) this.sfx.siren(level > 0);
+    }
   }
 
-  update(dt) {
-    this.time += dt;
-    this._spawnCooldown = Math.max(0, this._spawnCooldown - dt);
-    const ctx = this.ctx;
-    const playerPos = ctx.player.pos;
-    const driving = ctx.driving.car;
-
-    // Heat fades once the player has been quiet a while and no cruiser
-    // is anywhere near.
-    const nearestCop = this._nearestPoliceDistance(playerPos);
-    if (this.stars > 0 && this.time - this.lastCrimeAt > 10 && nearestCop > 70) {
-      this.stars = Math.max(0, this.stars - CONFIG.wanted.decayPerSecond * dt);
-      if (this.stars < 0.05) this.stars = 0;
-    }
-
-    // Match the patrol count to the heat.
-    const wantedCount = CONFIG.wanted.policeResponse[clamp(Math.floor(this.stars), 0, 5)] || 0;
-    if (this.police.length < wantedCount && this._spawnCooldown <= 0) {
-      this._spawnPolice(playerPos);
-      this._spawnCooldown = 1.5;
-    } else if (this.police.length > wantedCount) {
-      // The heat dropped: pull the farthest cruiser off the hunt.
-      let farthest = null;
-      let farthestDist = -1;
-      for (const car of this.police) {
-        const p = carWorldPos(car);
-        const d = Math.hypot(p.x - playerPos.x, p.z - playerPos.z);
-        if (d > farthestDist) {
-          farthestDist = d;
-          farthest = car;
-        }
-      }
-      if (farthest) this._removeCar(farthest);
-    }
-
-    // Every cruiser chases the player. While the hunt runs, remember
-    // whether any cruiser has the player cornered on foot — the bust
-    // clock is judged once, after the loop, from that single fact.
-    const target = driving ? carWorldPos(driving) : { x: playerPos.x, z: playerPos.z };
-    let cornered = false;
-    for (const car of [...this.police]) {
-      if (car.wrecked) {
-        // A wrecked cruiser is out of the hunt; leave the wreck behind.
-        this.police.splice(this.police.indexOf(car), 1);
-        continue;
-      }
-      const controls = driveToward(car, target.x, target.z);
-      // The hunt never dawdles: full throttle once roughly on course.
-      if (Math.abs(angleDiff(car.heading, Math.atan2(target.x - car.group.position.x, target.z - car.group.position.z))) < 0.4) {
-        controls.throttle = 1;
-      }
-      updateCar(car, controls, dt, this.ctx.city);
-      const p = carWorldPos(car);
-      const distToPlayer = Math.hypot(p.x - playerPos.x, p.z - playerPos.z);
-
-      if (driving) {
-        // Ramming the getaway car: damage it on contact.
-        const carPos = carWorldPos(driving);
-        const gap = Math.hypot(p.x - carPos.x, p.z - carPos.z);
-        if (gap < 3.4) {
-          driving.damage = Math.min(CONFIG.cars.wreckAt, driving.damage + 30 * dt);
-          if (Math.random() < dt * 2) this.ctx.sfx.crash(0.5);
-        }
-      } else if (distToPlayer < CONFIG.wanted.bustRadius) {
-        cornered = true;
-      } else if (distToPlayer < 3.2 && car.speed > 3) {
-        // Run down by a cruiser at speed.
-        if (this.time - (car._lastHitAt || -99) > 1) {
-          car._lastHitAt = this.time;
-          this.ctx.game.damagePlayer(12);
-          this.ctx.sfx.crash(0.6);
-        }
-      }
-    }
-
-    // One bust clock for the whole frame. While driving it holds still;
-    // on foot it fills while any cruiser is on top of the player and
-    // drains the moment the player breaks free.
-    if (!driving) {
-      if (cornered) {
-        this.bustTimer += dt;
-        if (!this._bustWarned) {
-          this._bustWarned = true;
-          this.ctx.game.showToast('The cops are on you — RUN!', 3000);
-        }
-        if (this.bustTimer >= CONFIG.wanted.bustTime) {
-          this.bustTimer = 0;
-          this._bustWarned = false;
-          this.ctx.game.busted();
-          return;
-        }
-      } else {
-        this.bustTimer = Math.max(0, this.bustTimer - dt * 2);
-        this._bustWarned = false;
-      }
-    }
-
-    this.ctx.sfx.siren(this.stars >= 1);
-  }
-
-  _nearestPoliceDistance(playerPos) {
-    let best = Infinity;
-    for (const car of this.police) {
-      const p = carWorldPos(car);
-      best = Math.min(best, Math.hypot(p.x - playerPos.x, p.z - playerPos.z));
-    }
-    return best;
+  _targetCruisers() {
+    const table = CONFIG.wanted.policeResponse;
+    return table[Math.min(this.stars, table.length - 1)] ?? 0;
   }
 
   _spawnPolice(playerPos) {
-    const ctx = this.ctx;
-    const city = ctx.city;
-    const lines = city.roadLines;
-    const snapToRoad = (v) => {
-      let best = lines[0];
-      let bestD = Math.abs(v - lines[0]);
-      for (const line of lines) {
-        const d = Math.abs(v - line);
-        if (d < bestD) {
-          bestD = d;
-          best = line;
-        }
-      }
-      return best;
-    };
-    // Appear on a road 60-90 m from the player, already facing them.
-    // Snap one axis onto a road line, then check the range again after
-    // clamping: a clamped spawn must never land on the player's toes.
-    for (let tries = 0; tries < 10; tries++) {
-      const angle = this._rng() * Math.PI * 2;
-      const dist = 60 + this._rng() * 30;
-      let x = playerPos.x + Math.cos(angle) * dist;
-      let z = playerPos.z + Math.sin(angle) * dist;
-      if (this._rng() < 0.5) x = snapToRoad(x);
-      else z = snapToRoad(z);
-      x = clamp(x, city.bounds.minX + 4, city.bounds.maxX - 4);
-      z = clamp(z, city.bounds.minZ + 4, city.bounds.maxZ - 4);
-      if (Math.hypot(x - playerPos.x, z - playerPos.z) < 50) continue;
-      const heading = Math.atan2(playerPos.x - x, playerPos.z - z);
-      const car = createCar(ctx.scene, ctx.THREE, 'police', x, z, heading);
+    const lines = this.city.roadLines;
+    const bounds = this.city.bounds;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      // Snap one axis to a road centre line so the cruiser starts on a road.
+      const axisX = this.rng() < 0.5;
+      const line = lines[Math.floor(this.rng() * lines.length)];
+      const along = bounds.minX + this.rng() * (bounds.maxX - bounds.minX);
+      const x = axisX ? line : clamp(along, bounds.minX, bounds.maxX);
+      const z = axisX ? clamp(along, bounds.minZ, bounds.maxZ) : line;
+      const dx = x - playerPos.x;
+      const dz = z - playerPos.z;
+      // Distance is checked AFTER clamping, so a clamp can never drop a
+      // cruiser on the player's head at the city edge.
+      if (Math.hypot(dx, dz) < 50) continue;
+      // Face into the city, not out at the map edge: a cruiser spawned
+      // pointing at the boundary pins itself there (it has no speed to
+      // turn with) and never reaches the player.
+      const heading = axisX ? (z > 0 ? Math.PI : 0) : (x > 0 ? -Math.PI / 2 : Math.PI / 2);
+      const car = createCar(this.scene, this.THREE, 'police', x, z, heading);
       car.driver = 'police';
-      ctx.cars.push(car);
+      this.scene.add(car.group);
       this.police.push(car);
-      return;
+      return car;
     }
-    // No clear road in range this tick; the cooldown tries again.
+    return null;
   }
 
-  _removeCar(car) {
-    const ctx = this.ctx;
+  _removeAllPolice() {
+    for (const car of this.police) this.scene.remove(car.group);
+    this.police = [];
+  }
+
+  _removeCruiser(car) {
     const i = this.police.indexOf(car);
-    if (i !== -1) this.police.splice(i, 1);
-    const j = ctx.cars.indexOf(car);
-    if (j !== -1) ctx.cars.splice(j, 1);
-    ctx.scene.remove(car.group);
+    if (i >= 0) this.police.splice(i, 1);
+    this.scene.remove(car.group);
+  }
+
+  // Steer a car toward a point. Verified against the engine: positive steer
+  // INCREASES heading, and forward is (sin h, cos h), so the desired
+  // heading is atan2(dx, dz) and steer follows the signed angle gap.
+  driveToward(car, tx, tz, dt, speedCap = 1) {
+    const dx = tx - car.group.position.x;
+    const dz = tz - car.group.position.z;
+    const dist = Math.hypot(dx, dz);
+    const desired = Math.atan2(dx, dz);
+    // angleDiff(a, b) is b - a, so the gap must be (heading -> desired):
+    // angleDiff(car.heading, desired) is positive exactly when the
+    // heading has to INCREASE to face the target, which is the steer
+    // direction (positive steer increases heading).
+    const gap = angleDiff(car.heading, desired);
+    const steer = clamp(gap * 2.2, -1, 1);
+    const throttle = dist < 6 ? 0 : (Math.abs(gap) > 1.1 ? 0.35 : speedCap);
+    // Un-wedge: a cruiser pinned against a building or the map edge has
+    // no speed, and heading only follows speed, so it can never turn
+    // around on its own — it would grind there forever. If it has been
+    // nearly stopped for a second while it wants to move, back it up
+    // for a beat (steer inverted, so the nose keeps turning the same
+    // way) and it frees itself. Only while far from the target: up
+    // close the cruiser is meant to sit still and bust the player.
+    if (car._reverseT > 0) {
+      car._reverseT -= dt;
+      updateCar(car, { throttle: -0.7, steer: -steer, brake: false, handbrake: false }, dt, this.city);
+      return dist;
+    }
+    if (dist > 8 && Math.abs(car.speed) < 1.5) {
+      car._stuckT = (car._stuckT ?? 0) + dt;
+      if (car._stuckT > 1) {
+        car._reverseT = 0.8;
+        car._stuckT = 0;
+      }
+    } else {
+      car._stuckT = 0;
+    }
+    updateCar(car, { throttle, steer, brake: dist < 4, handbrake: false }, dt, this.city);
+    return dist;
+  }
+
+  update(dt, ctx) {
+    const now = ctx.time;
+    const playerPos = ctx.playerPos;
+    const inCar = !!ctx.inCar;
+    const playerCar = ctx.car ?? null;
+
+    // Decay: only while quiet (no crime for a while) and unseen (no
+    // cruiser close by). A hot pursuit never cools off on its own.
+    const nearestPolice = this.police.length
+      ? Math.min(...this.police.map((c) => Math.hypot(c.group.position.x - playerPos.x, c.group.position.z - playerPos.z)))
+      : Infinity;
+    if (now - this.lastCrimeAt > 10 && nearestPolice > 60 && this.points > 0) {
+      this.points = Math.max(0, this.points - CONFIG.wanted.decayPerSecond * dt);
+      this._syncLevel();
+    }
+
+    // Keep the cruiser count matched to the star level.
+    const want = this._targetCruisers();
+    this.spawnTimer -= dt;
+    if (this.police.length < want && this.spawnTimer <= 0) {
+      if (this._spawnPolice(playerPos)) this.spawnTimer = 0.8;
+    } else if (this.police.length > want) {
+      // Shed the farthest cruisers first when the heat drops.
+      this.police.sort((a, b) => {
+        const da = Math.hypot(a.group.position.x - playerPos.x, a.group.position.z - playerPos.z);
+        const db = Math.hypot(b.group.position.x - playerPos.x, b.group.position.z - playerPos.z);
+        return db - da;
+      });
+      while (this.police.length > want) this._removeCruiser(this.police[0]);
+    }
+
+    // Chase + ram. On foot the cruisers close in; in a car they try to
+    // cut the player off and shove the player's car.
+    for (const cruiser of [...this.police]) {
+      // A cruiser that wrecked itself on a building leaves the pursuit,
+      // and the fleet top-up above spawns a fresh one in its place.
+      if (cruiser.wrecked) {
+        this._removeCruiser(cruiser);
+        continue;
+      }
+      const target = playerCar
+        ? { x: playerCar.group.position.x, z: playerCar.group.position.z }
+        : { x: playerPos.x, z: playerPos.z };
+      this.driveToward(cruiser, target.x, target.z, dt, 1);
+      if (playerCar) {
+        const d = Math.hypot(
+          cruiser.group.position.x - playerCar.group.position.x,
+          cruiser.group.position.z - playerCar.group.position.z,
+        );
+        if (d < 3.4) {
+          // A ram: scrape speed off the player's car and dent it.
+          playerCar.speed *= 1 - 1.6 * dt;
+          playerCar.damage = Math.min(100, (playerCar.damage ?? 0) + 6 * dt);
+          if (this.sfx && Math.abs(playerCar.speed) > 6 && this.rng() < dt * 2) this.sfx.crash(0.5);
+        }
+      }
+    }
+
+    // Busted: judged ONCE per frame. Any cruiser within bust radius of
+    // the on-foot player fills the clock; otherwise it drains fast.
+    if (!inCar && this.stars > 0) {
+      const cornered = this.police.some((c) => {
+        const d = Math.hypot(c.group.position.x - playerPos.x, c.group.position.z - playerPos.z);
+        return d <= CONFIG.wanted.bustRadius;
+      });
+      if (cornered) {
+        this.bustTimer += dt;
+        if (this.bustTimer >= CONFIG.wanted.bustTime) {
+          this.bustTimer = 0;
+          this.onBusted();
+        }
+      } else {
+        this.bustTimer = Math.max(0, this.bustTimer - dt * 2);
+      }
+    } else {
+      this.bustTimer = 0;
+    }
   }
 }
