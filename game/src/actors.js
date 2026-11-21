@@ -1,175 +1,243 @@
-// Solmar's people: one box-built humanoid factory for the player,
-// pedestrians, police officers and mission enemies, plus a thin Person
-// wrapper that moves them, animates their walk and tracks their health.
-// Behaviour (wandering, chasing, shooting) lives in game.js; this file
-// only knows how a person looks and moves.
+// Solmar — game/src/actors.js
+// People: a blocky third-person player character with walk/run/jump
+// animation, and pedestrians who stroll the sidewalks and flee when
+// threatened. All models are built from three.js primitives.
+//
+// API:
+//   createPlayer(scene, THREE, x, z) -> player
+//     player = { group, pos: THREE.Vector3 (feet), heading, speed,
+//                vy, grounded, walkPhase, limbs: { legL, legR, armL, armR } }
+//   updatePlayer(player, move, dt, world)
+//     move = { forward: -1..1, strafe: -1..1, heading, sprint: bool,
+//              jump: bool } — moves the player on foot, applies gravity,
+//              collides with the city's colliders, swings the limbs.
+//   createPedestrian(scene, THREE, x, z, opts?) -> ped
+//     opts = { shirt, pants, skin, speed } — colours are hex numbers.
+//   updatePedestrian(ped, dt, world, threats)
+//     threats = [{ x, z, radius }] — peds inside a threat radius flee;
+//     otherwise they stroll along their sidewalk path and turn at corners.
+//   makePedestrianWalk(ped, dt) — internal limb swing, also used by player.
+//   setPedFleeing(ped, on) — force a ped to run away from its position.
 
-import * as THREE from 'three';
-import { resolveCircle } from './world.js';
+import { CONFIG } from './config.js';
+import { clamp, makeRng, pick, range, angleLerp, damp } from './util.js';
 
-const SKIN_TONES = [0xe8b88a, 0xc98e5f, 0x8a5a34, 0xf0c8a0];
+const SHIRTS = [0xd05040, 0x3a7a8a, 0x6a8a3a, 0xe8b820, 0x8a5aa0, 0xdddddd, 0x2a2c30, 0xc07030];
+const PANTS = [0x2a344a, 0x3a3a3a, 0x5a4a3a, 0x243028];
+const SKINS = [0xe8b88a, 0xc98a5a, 0x8a5a3a, 0xf0c8a0];
 
-// Build a simple humanoid from boxes. The figure faces +Z; heading 0
-// faces +Z and rotation.y turns it. Arms and legs pivot at the shoulder
-// and hip so the walk animation can swing them.
-export function buildPersonMesh(opts = {}) {
-  const shirt = opts.shirt ?? 0x4a90d8;
-  const pants = opts.pants ?? 0x2c3136;
-  const skin = opts.skin ?? SKIN_TONES[0];
-  const scale = opts.scale ?? 1;
+// A blocky humanoid: torso, head, arms and legs as boxes, with pivots at
+// the shoulders and hips so the limbs can swing.
+function buildFigure(THREE, shirt, pants, skin, scale = 1) {
   const group = new THREE.Group();
+  const mat = (c) => new THREE.MeshStandardMaterial({ color: c, roughness: 0.85 });
 
-  const shirtMat = new THREE.MeshLambertMaterial({ color: shirt });
-  const pantsMat = new THREE.MeshLambertMaterial({ color: pants });
-  const skinMat = new THREE.MeshLambertMaterial({ color: skin });
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.72, 0.34), mat(shirt));
+  torso.position.y = 1.08 * scale;
+  torso.castShadow = true;
+  group.add(torso);
 
-  const legGeo = new THREE.BoxGeometry(0.22, 0.78, 0.26);
-  legGeo.translate(0, -0.39, 0);
-  const leftLeg = new THREE.Mesh(legGeo, pantsMat);
-  leftLeg.position.set(-0.14, 0.78, 0);
-  const rightLeg = new THREE.Mesh(legGeo, pantsMat);
-  rightLeg.position.set(0.14, 0.78, 0);
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.38, 0.38, 0.38), mat(skin));
+  head.position.y = 1.66 * scale;
+  head.castShadow = true;
+  group.add(head);
 
-  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.72, 0.34), shirtMat);
-  torso.position.set(0, 1.14, 0);
+  // Simple hair cap.
+  const hair = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.14, 0.4), mat(0x2a2018));
+  hair.position.y = 1.88 * scale;
+  group.add(hair);
 
-  const armGeo = new THREE.BoxGeometry(0.17, 0.66, 0.2);
-  armGeo.translate(0, -0.33, 0);
-  const leftArm = new THREE.Mesh(armGeo, shirtMat);
-  leftArm.position.set(-0.4, 1.46, 0);
-  const rightArm = new THREE.Mesh(armGeo, shirtMat);
-  rightArm.position.set(0.4, 1.46, 0);
+  const mkLimb = (w, h, d, c, x, y) => {
+    const pivot = new THREE.Group();
+    pivot.position.set(x, y, 0);
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat(c));
+    mesh.position.y = -h / 2;
+    mesh.castShadow = true;
+    pivot.add(mesh);
+    group.add(pivot);
+    return pivot;
+  };
 
-  const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.36, 0.32), skinMat);
-  head.position.set(0, 1.68, 0);
-
-  group.add(leftLeg, rightLeg, torso, leftArm, rightArm, head);
-  group.traverse((m) => {
-    if (m.isMesh) {
-      m.castShadow = true;
-    }
-  });
-
-  // Optional hat: a flat cap (cops), a bandana (thugs), or a sun hat.
-  if (opts.hat) {
-    const hat = new THREE.Mesh(
-      new THREE.BoxGeometry(0.4, 0.1, 0.38),
-      new THREE.MeshLambertMaterial({ color: opts.hat }),
-    );
-    hat.position.set(0, 1.9, 0);
-    group.add(hat);
-  }
-  // The player carries a visible pistol when armed.
-  let gun = null;
-  if (opts.gun) {
-    gun = new THREE.Mesh(
-      new THREE.BoxGeometry(0.08, 0.12, 0.34),
-      new THREE.MeshLambertMaterial({ color: 0x1a1d20 }),
-    );
-    gun.position.set(0.4, 0.86, 0.2);
-    group.add(gun);
-  }
+  const legL = mkLimb(0.22, 0.72, 0.24, pants, -0.16, 0.72 * scale);
+  const legR = mkLimb(0.22, 0.72, 0.24, pants, 0.16, 0.72 * scale);
+  const armL = mkLimb(0.16, 0.62, 0.18, shirt, -0.4, 1.38 * scale);
+  const armR = mkLimb(0.16, 0.62, 0.18, shirt, 0.4, 1.38 * scale);
 
   group.scale.setScalar(scale);
-  const parts = { leftArm, rightArm, leftLeg, rightLeg, torso, head, gun };
-  return { group, parts };
+  return { group, limbs: { legL, legR, armL, armR } };
 }
 
-// Swing the limbs for a walk cycle. phase advances with distance walked;
-// amount 0..1 blends the swing in and out.
-export function animatePersonWalk(parts, phase, amount) {
-  const swing = Math.sin(phase) * 0.62 * amount;
-  parts.leftLeg.rotation.x = swing;
-  parts.rightLeg.rotation.x = -swing;
-  parts.leftArm.rotation.x = -swing * 0.9;
-  parts.rightArm.rotation.x = swing * 0.9;
-  parts.torso.position.y = 1.14 + Math.abs(Math.sin(phase)) * 0.04 * amount;
+export function createPlayer(scene, THREE, x, z) {
+  // The player wears a teal jacket so they read clearly on the street.
+  const { group, limbs } = buildFigure(THREE, 0x2a8a7a, 0x2a344a, 0xe8b88a, 1.0);
+  group.position.set(x, 0, z);
+  scene.add(group);
+  return {
+    group,
+    pos: group.position,
+    heading: 0,
+    speed: 0,
+    vy: 0,
+    grounded: true,
+    walkPhase: 0,
+    limbs,
+    radius: CONFIG.player.radius,
+  };
 }
 
-export class Person {
-  constructor(scene, opts = {}) {
-    this.scene = scene;
-    this.role = opts.role ?? 'ped';
-    const built = buildPersonMesh(opts);
-    this.group = built.group;
-    this.parts = built.parts;
-    this.pos = new THREE.Vector3(opts.x ?? 0, 0, opts.z ?? 0);
-    this.heading = opts.heading ?? 0;
-    this.health = opts.health ?? 100;
-    this.maxHealth = this.health;
-    this.walkPhase = Math.random() * Math.PI * 2;
-    this.speed = 0;
-    this.down = false;
-    this.dead = false;
-    this.group.position.copy(this.pos);
-    this.group.rotation.y = this.heading;
-    scene.add(this.group);
-  }
+export function updatePlayer(player, move, dt, world) {
+  const cfg = CONFIG.player;
+  const targetSpeed = move.sprint ? cfg.runSpeed : cfg.walkSpeed;
+  const moving = Math.abs(move.forward) > 0.05 || Math.abs(move.strafe) > 0.05;
+  const speed = moving ? targetSpeed : 0;
+  player.speed = damp(player.speed, speed, 10, dt);
 
-  place(x, z, heading = this.heading) {
-    this.pos.set(x, 0, z);
-    this.heading = heading;
-    this.group.position.copy(this.pos);
-    this.group.rotation.y = heading;
-  }
+  // Face the camera heading while moving; stand still otherwise.
+  if (moving) player.heading = angleLerp(player.heading, move.heading, 1 - Math.exp(-12 * dt));
 
-  faceToward(x, z) {
-    this.heading = Math.atan2(x - this.pos.x, z - this.pos.z);
-    this.group.rotation.y = this.heading;
-  }
+  const fx = Math.sin(player.heading);
+  const fz = Math.cos(player.heading);
+  const rx = Math.cos(player.heading);
+  const rz = -Math.sin(player.heading);
+  const p = player.pos;
+  p.x += (fx * move.forward + rx * move.strafe) * player.speed * dt;
+  p.z += (fz * move.forward + rz * move.strafe) * player.speed * dt;
 
-  // Walk forward along the current heading, pushing out of buildings.
-  // Returns the distance actually covered.
-  step(dt, speed, colliders) {
-    if (this.down || this.dead) return 0;
-    const before = this.pos.clone();
-    this.pos.x += Math.sin(this.heading) * speed * dt;
-    this.pos.z += Math.cos(this.heading) * speed * dt;
-    resolveCircle(this.pos, 0.7, colliders);
-    const moved = Math.hypot(this.pos.x - before.x, this.pos.z - before.z);
-    this.walkPhase += moved * 2.4;
-    this.speed = moved / Math.max(dt, 0.0001);
-    this.group.position.copy(this.pos);
-    this.group.rotation.y = this.heading;
-    animatePersonWalk(this.parts, this.walkPhase, Math.min(1, this.speed / 3));
-    return moved;
+  // Jump and gravity.
+  if (move.jump && player.grounded) {
+    player.vy = cfg.jumpSpeed;
+    player.grounded = false;
   }
-
-  // Stand still and let the walk cycle settle.
-  idle(dt) {
-    this.speed = 0;
-    animatePersonWalk(this.parts, this.walkPhase, 0);
-  }
-
-  // Take damage; returns true when this kills the person.
-  damage(amount) {
-    if (this.dead) return true;
-    this.health -= amount;
-    if (this.health <= 0) {
-      this.health = 0;
-      this.dead = true;
-      this.fall();
-      return true;
+  if (!player.grounded) {
+    player.vy -= cfg.gravity * dt;
+    p.y += player.vy * dt;
+    if (p.y <= 0) {
+      p.y = 0;
+      player.vy = 0;
+      player.grounded = true;
     }
-    return false;
   }
 
-  // Fall flat on the ground (used for knocked-down peds and dead enemies).
-  fall() {
-    this.down = true;
-    this.group.rotation.x = -Math.PI / 2;
-    this.group.position.y = 0.25;
+  world.resolveCircle(p, player.radius);
+  const b = world.bounds;
+  p.x = clamp(p.x, b.minX + 1, b.maxX - 1);
+  p.z = clamp(p.z, b.minZ + 1, b.maxZ - 1);
+
+  player.group.rotation.y = player.heading;
+  // Limb swing: legs and arms counter-swing, faster when running.
+  player.walkPhase += dt * player.speed * 1.6;
+  const swing = moving ? Math.sin(player.walkPhase) * clamp(player.speed / cfg.runSpeed, 0.25, 1) : 0;
+  const { legL, legR, armL, armR } = player.limbs;
+  legL.rotation.x = swing * 0.9;
+  legR.rotation.x = -swing * 0.9;
+  armL.rotation.x = -swing * 0.7;
+  armR.rotation.x = swing * 0.7;
+}
+
+export function createPedestrian(scene, THREE, x, z, opts = {}) {
+  const rng = makeRng((Math.random() * 1e9) | 0);
+  const shirt = opts.shirt ?? pick(rng, SHIRTS);
+  const pants = opts.pants ?? pick(rng, PANTS);
+  const skin = opts.skin ?? pick(rng, SKINS);
+  const scale = opts.scale ?? range(rng, 0.92, 1.06);
+  const { group, limbs } = buildFigure(THREE, shirt, pants, skin, scale);
+  group.position.set(x, 0, z);
+  scene.add(group);
+  return {
+    group,
+    pos: group.position,
+    heading: rng() * Math.PI * 2,
+    walkSpeed: opts.speed ?? range(rng, CONFIG.peds.walkSpeedMin, CONFIG.peds.walkSpeedMax),
+    walkPhase: rng() * 6,
+    limbs,
+    fleeing: false,
+    fleeTimer: 0,
+    // Sidewalk strolling: pick a road line and a direction; the ped walks
+    // along it and turns at the city edge.
+    lane: opts.lane ?? null,
+    laneDir: rng() < 0.5 ? 1 : -1,
+    radius: 0.5,
+    alive: true,
+  };
+}
+
+export function setPedFleeing(ped, on) {
+  ped.fleeing = on;
+  ped.fleeTimer = on ? 3 : 0;
+}
+
+export function updatePedestrian(ped, dt, world, threats = []) {
+  if (!ped.alive) return;
+  const p = ped.pos;
+
+  // Check threats: any threat closer than the flee radius sends the ped running.
+  let fleeX = 0;
+  let fleeZ = 0;
+  let threatened = false;
+  for (const t of threats) {
+    const dx = p.x - t.x;
+    const dz = p.z - t.z;
+    const d = Math.hypot(dx, dz);
+    if (d < (t.radius ?? CONFIG.peds.fleeRadius)) {
+      threatened = true;
+      const inv = 1 / (d || 1);
+      fleeX += dx * inv;
+      fleeZ += dz * inv;
+    }
+  }
+  if (threatened) {
+    ped.fleeing = true;
+    ped.fleeTimer = 2;
+  } else if (ped.fleeTimer > 0) {
+    ped.fleeTimer -= dt;
+    if (ped.fleeTimer <= 0) ped.fleeing = false;
   }
 
-  rise() {
-    this.down = false;
-    this.dead = false;
-    this.health = this.maxHealth;
-    this.group.rotation.x = 0;
-    this.group.position.y = 0;
+  let speed = ped.walkSpeed;
+  let dirX = 0;
+  let dirZ = 0;
+  if (ped.fleeing) {
+    speed = CONFIG.peds.fleeSpeed;
+    const l = Math.hypot(fleeX, fleeZ) || 1;
+    dirX = fleeX / l;
+    dirZ = fleeZ / l;
+  } else if (ped.lane) {
+    // Stroll along the assigned road line (sidewalk beside it).
+    const axis = ped.lane.axis;
+    const off = ped.lane.offset || 9;
+    if (axis === 'x') {
+      dirX = ped.laneDir;
+      dirZ = 0;
+      p.z = damp(p.z, ped.lane.line + off, 4, dt);
+      if (p.x > world.bounds.maxX - 6) ped.laneDir = -1;
+      if (p.x < world.bounds.minX + 6) ped.laneDir = 1;
+    } else {
+      dirX = 0;
+      dirZ = ped.laneDir;
+      p.x = damp(p.x, ped.lane.line + off, 4, dt);
+      if (p.z > world.bounds.maxZ - 6) ped.laneDir = -1;
+      if (p.z < world.bounds.minZ + 6) ped.laneDir = 1;
+    }
+  } else {
+    // No lane: wander in a slow circle.
+    ped.heading += dt * 0.4;
+    dirX = Math.sin(ped.heading);
+    dirZ = Math.cos(ped.heading);
   }
 
-  remove() {
-    this.scene.remove(this.group);
+  if (dirX !== 0 || dirZ !== 0) {
+    const targetHeading = Math.atan2(dirX, dirZ);
+    ped.heading = angleLerp(ped.heading, targetHeading, 1 - Math.exp(-8 * dt));
+    p.x += dirX * speed * dt;
+    p.z += dirZ * speed * dt;
+    world.resolveCircle(p, ped.radius);
   }
+
+  ped.group.rotation.y = ped.heading;
+  ped.walkPhase += dt * speed * 2.2;
+  const swing = Math.sin(ped.walkPhase) * 0.7;
+  ped.limbs.legL.rotation.x = swing;
+  ped.limbs.legR.rotation.x = -swing;
+  ped.limbs.armL.rotation.x = -swing * 0.8;
+  ped.limbs.armR.rotation.x = swing * 0.8;
 }

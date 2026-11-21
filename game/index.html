@@ -4,255 +4,206 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <link rel="icon" href="data:,">
-<title>Solmar — Open World</title>
+<title>Solmar — an open-world crime game</title>
 <style>
   :root {
-    --amber: #ffb62e;
-    --teal: #19c2b8;
-    --red: #ff3b30;
-    --panel: rgba(8, 12, 18, 0.72);
-    --line: rgba(255, 255, 255, 0.16);
+    --panel: rgba(12, 14, 18, 0.72);
+    --panel-border: rgba(255, 255, 255, 0.14);
+    --accent: #ffd23e;
+    --teal: #2ad4c4;
+    --text: #f2f2ee;
+    --muted: #b8b8ae;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0e14; }
-  body { font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; color: #f2f5f7; }
-  #scene { position: fixed; inset: 0; }
-  #scene canvas { display: block; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0c10; }
+  body { font-family: "Segoe UI", Arial, Helvetica, sans-serif; color: var(--text); }
+  #game-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 
-  /* ---------- HUD ---------- */
-  #hud { position: fixed; inset: 0; pointer-events: none; display: none; z-index: 5; }
-  #hud.on { display: block; }
-  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
-    backdrop-filter: blur(4px); box-shadow: 0 4px 18px rgba(0,0,0,0.35); }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--panel-border);
+    border-radius: 10px;
+    backdrop-filter: blur(6px);
+    box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  }
+  .label { font-size: 10px; letter-spacing: 0.18em; color: var(--muted); text-transform: uppercase; }
 
-  #wanted { position: absolute; top: 14px; left: 50%; transform: translateX(-50%);
-    padding: 6px 14px; display: flex; align-items: center; gap: 10px; }
-  #wanted .label { font-size: 11px; letter-spacing: 2px; color: #c8d2da; font-weight: 700; }
-  #wanted-stars { font-size: 20px; letter-spacing: 3px; color: var(--amber); line-height: 1; }
-  #wanted-stars .off { color: rgba(255,255,255,0.25); }
-  #wanted.hot { border-color: rgba(255,59,48,0.7); }
-  #wanted.hot #wanted-stars { color: var(--red); }
+  /* Top-left: mission card */
+  #mission-card {
+    position: fixed; top: 16px; left: 16px; z-index: 5;
+    padding: 12px 16px; max-width: 320px;
+  }
+  #mission-card .mission-title { color: var(--accent); font-weight: 700; font-size: 12px; letter-spacing: 0.12em; }
+  #mission-card .mission-objective { font-size: 17px; font-weight: 600; margin-top: 4px; }
+  #mission-card .mission-distance { color: var(--teal); font-size: 13px; font-weight: 600; margin-top: 2px; }
 
-  #stats { position: absolute; top: 14px; right: 14px; padding: 10px 14px; min-width: 210px; }
-  #money { font-size: 26px; font-weight: 800; color: #7ee787; letter-spacing: 0.5px; }
-  #money .cur { font-size: 16px; color: #b8e6c2; }
-  .bar-row { display: flex; align-items: center; gap: 8px; margin-top: 7px; }
-  .bar-row .tag { font-size: 11px; font-weight: 700; letter-spacing: 1px; color: #c8d2da; width: 44px; }
-  .bar { flex: 1; height: 10px; background: rgba(255,255,255,0.14); border-radius: 5px; overflow: hidden; }
-  .bar > div { height: 100%; border-radius: 5px; transition: width 0.18s ease; }
-  #health-fill { background: linear-gradient(90deg, #2fd67a, #7ee787); width: 100%; }
-  #health-fill.low { background: linear-gradient(90deg, #ff3b30, #ff7a45); }
-  #health-text { font-size: 11px; color: #dfe7ec; width: 34px; text-align: right; }
-  #ammo { font-size: 12px; color: #ffd479; margin-top: 7px; letter-spacing: 1px; }
+  /* Top-centre: wanted stars */
+  #wanted-panel {
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 5;
+    padding: 8px 18px; display: flex; align-items: center; gap: 10px;
+  }
+  #wanted-panel .label { font-size: 12px; }
+  #wanted-stars { font-size: 20px; letter-spacing: 4px; color: #555; }
+  #wanted-stars .lit { color: #ff3b30; text-shadow: 0 0 8px rgba(255, 59, 48, 0.8); }
 
-  #minimap-wrap { position: absolute; left: 14px; bottom: 14px; padding: 8px; }
-  #minimap { display: block; width: 208px; height: 208px; border-radius: 6px; }
-  #minimap-wrap .cap { font-size: 10px; letter-spacing: 2px; color: #9fb0bc; text-align: center; margin-top: 5px; }
+  /* Top-right: money / health / ammo */
+  #status-panel {
+    position: fixed; top: 16px; right: 16px; z-index: 5;
+    padding: 12px 16px; min-width: 230px; text-align: right;
+  }
+  #hud-money { font-size: 28px; font-weight: 800; color: #7dff8a; line-height: 1; }
+  #hud-health-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; justify-content: flex-end; }
+  #hud-health-bar-wrap { width: 130px; height: 10px; background: rgba(255,255,255,0.18); border-radius: 5px; overflow: hidden; }
+  #hud-health-bar { height: 100%; width: 100%; background: linear-gradient(90deg, #37d67a, #7dff8a); border-radius: 5px; }
+  #hud-health-num { font-size: 12px; font-weight: 700; }
+  #hud-ammo { font-size: 13px; color: var(--accent); font-weight: 600; margin-top: 6px; letter-spacing: 0.05em; }
 
-  #objective { position: absolute; left: 14px; top: 14px; padding: 10px 14px; max-width: 340px; }
-  #objective .kicker { font-size: 10px; letter-spacing: 2px; color: var(--amber); font-weight: 800; }
-  #objective-text { font-size: 15px; font-weight: 700; margin-top: 3px; line-height: 1.35; }
-  #objective-dist { font-size: 12px; color: var(--teal); margin-top: 3px; font-weight: 700; }
+  /* Bottom-left: minimap */
+  #minimap-wrap {
+    position: fixed; left: 16px; bottom: 16px; z-index: 5;
+    padding: 8px; text-align: center;
+  }
+  #minimap { display: block; border-radius: 6px; background: #20242c; }
+  #minimap-wrap .label { display: block; margin-top: 6px; }
 
-  #prompt { position: absolute; left: 50%; bottom: 128px; transform: translateX(-50%);
-    padding: 8px 16px; font-size: 14px; font-weight: 700; display: none; }
-  #prompt.on { display: block; }
-  #prompt b { color: var(--amber); }
+  /* Bottom-right: speed + controls */
+  #speed-panel {
+    position: fixed; right: 16px; bottom: 96px; z-index: 5;
+    padding: 8px 16px; text-align: center; min-width: 92px;
+  }
+  #hud-speed { font-size: 30px; font-weight: 800; line-height: 1; }
+  #controls-help {
+    position: fixed; right: 16px; bottom: 16px; z-index: 5;
+    padding: 10px 14px; font-size: 12px; line-height: 1.7; color: var(--muted);
+  }
+  #controls-help b { color: var(--text); }
 
-  #speed { position: absolute; right: 16px; bottom: 16px; padding: 8px 14px; text-align: right; display: none; }
-  #speed.on { display: block; }
-  #speed .num { font-size: 30px; font-weight: 800; line-height: 1; }
-  #speed .unit { font-size: 11px; letter-spacing: 2px; color: #9fb0bc; }
+  /* Centre toast + crosshair */
+  #toast {
+    position: fixed; left: 50%; bottom: 22%; transform: translateX(-50%); z-index: 6;
+    padding: 10px 22px; font-size: 15px; font-weight: 600; display: none;
+  }
+  #crosshair {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 4;
+    font-size: 22px; color: rgba(255,255,255,0.85); text-shadow: 0 0 4px #000; display: none;
+    pointer-events: none;
+  }
 
-  #crosshair { position: absolute; left: 50%; top: 50%; width: 14px; height: 14px;
-    transform: translate(-50%, -50%); display: none; }
-  #crosshair.on { display: block; }
-  #crosshair::before, #crosshair::after { content: ""; position: absolute; background: rgba(255,255,255,0.9);
-    box-shadow: 0 0 3px rgba(0,0,0,0.8); }
-  #crosshair::before { left: 6px; top: 0; width: 2px; height: 14px; }
-  #crosshair::after { left: 0; top: 6px; width: 14px; height: 2px; }
-
-  #damage-flash { position: fixed; inset: 0; pointer-events: none; z-index: 6; opacity: 0;
-    background: radial-gradient(ellipse at center, transparent 55%, rgba(255,20,10,0.55) 100%); }
-  #toast { position: absolute; left: 50%; bottom: 176px; transform: translateX(-50%);
-    padding: 7px 14px; font-size: 13px; font-weight: 700; display: none; white-space: nowrap; }
-  #toast.on { display: block; }
-
-  #mission-card { position: absolute; left: 50%; top: 22%; transform: translateX(-50%);
-    width: min(560px, 88vw); padding: 22px 26px; text-align: center; display: none; z-index: 8; }
-  #mission-card.on { display: block; }
-  #mission-card .kicker { font-size: 11px; letter-spacing: 4px; color: var(--amber); font-weight: 800; }
-  #mission-card-title { font-size: 34px; font-weight: 900; letter-spacing: 1px; margin-top: 6px;
-    font-family: Impact, "Arial Black", sans-serif; text-transform: uppercase; }
-  #mission-card-sub { font-size: 13px; color: var(--teal); font-weight: 700; margin-top: 4px; letter-spacing: 1px; }
-  #mission-card-text { font-size: 14px; line-height: 1.55; color: #dfe7ec; margin-top: 10px; }
-
-  #big-center { position: absolute; left: 50%; top: 38%; transform: translate(-50%, -50%);
-    text-align: center; display: none; z-index: 8; text-shadow: 0 3px 14px rgba(0,0,0,0.8); }
-  #big-center.on { display: block; }
-  #big-center-title { font-size: 54px; font-weight: 900; letter-spacing: 2px;
-    font-family: Impact, "Arial Black", sans-serif; text-transform: uppercase; }
-  #big-center-title.good { color: #7ee787; }
-  #big-center-title.bad { color: var(--red); }
-  #big-center-title.gold { color: var(--amber); }
-  #big-center-sub { font-size: 16px; margin-top: 6px; color: #e8eef2; font-weight: 700; }
-
-  #hint { position: absolute; right: 14px; bottom: 118px; padding: 8px 12px; font-size: 11px;
-    line-height: 1.7; color: #b9c6cf; text-align: right; }
-  #hint b { color: #fff; }
-
-  /* ---------- Overlays (menu / pause / end) ---------- */
-  .overlay { position: fixed; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
-    background: linear-gradient(180deg, rgba(5,8,12,0.55) 0%, rgba(5,8,12,0.82) 100%); }
-  .overlay.hidden { display: none; }
-  .sheet { width: min(680px, 92vw); max-height: 92vh; overflow-y: auto; padding: 34px 40px; text-align: center;
-    background: rgba(10, 15, 22, 0.88); border: 1px solid var(--line); border-radius: 16px;
-    box-shadow: 0 18px 60px rgba(0,0,0,0.6); }
-  .logo { font-family: Impact, "Arial Black", sans-serif; font-size: 76px; letter-spacing: 6px;
-    line-height: 0.95; text-transform: uppercase;
-    background: linear-gradient(180deg, #ffe9a8 0%, var(--amber) 55%, #ff7a1a 100%);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    text-shadow: 0 6px 30px rgba(255, 150, 20, 0.25); }
-  .tagline { margin-top: 6px; font-size: 13px; letter-spacing: 5px; color: var(--teal); font-weight: 800; }
-  .story { margin: 18px auto 4px; font-size: 14.5px; line-height: 1.65; color: #d5dee5; max-width: 560px; text-align: left; }
-  .story b { color: var(--amber); }
-  .btn { display: block; width: 100%; margin-top: 12px; padding: 13px 18px; font-size: 16px; font-weight: 800;
-    letter-spacing: 1px; color: #10151b; background: var(--amber); border: none; border-radius: 9px;
-    cursor: pointer; pointer-events: auto; }
-  .btn:hover { filter: brightness(1.1); }
-  .btn.ghost { background: transparent; color: #e8eef2; border: 1px solid var(--line); }
-  .btn.ghost:hover { border-color: var(--amber); color: var(--amber); }
-  .btn:disabled { opacity: 0.45; cursor: default; filter: none; }
-  .controls-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 18px; text-align: left;
-    font-size: 13px; line-height: 1.9; color: #c9d4dc; margin-top: 16px; }
-  .controls-grid b { color: #fff; display: inline-block; min-width: 92px; }
-  .fine { margin-top: 16px; font-size: 11.5px; line-height: 1.6; color: #8fa0ac; }
-  #menu-save-note { margin-top: 10px; font-size: 12px; color: #7ee787; font-weight: 700; min-height: 16px; }
-  #howto { display: none; text-align: left; margin-top: 14px; }
-  #howto.on { display: block; }
-  #howto h3 { font-size: 13px; letter-spacing: 2px; color: var(--amber); margin: 12px 0 4px; }
-  #howto p, #howto li { font-size: 13px; line-height: 1.6; color: #c9d4dc; }
-  #howto ul { padding-left: 18px; }
-  #end-title { font-family: Impact, "Arial Black", sans-serif; font-size: 64px; letter-spacing: 4px;
-    text-transform: uppercase; }
-  #end-title.bad { color: var(--red); }
-  #end-title.gold { color: var(--amber); }
-  #end-text { font-size: 15px; line-height: 1.65; color: #d5dee5; margin-top: 10px; }
-  #pause-note { margin-top: 12px; font-size: 12px; color: #8fa0ac; min-height: 16px; }
-  .kbd { display: inline-block; min-width: 22px; padding: 1px 6px; border: 1px solid var(--line);
-    border-bottom-width: 2px; border-radius: 5px; background: rgba(255,255,255,0.08);
-    font-size: 11px; font-weight: 800; color: #fff; text-align: center; }
+  /* Full-screen overlays */
+  .overlay {
+    position: fixed; inset: 0; z-index: 20;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    background: rgba(6, 8, 12, 0.55); text-align: center; padding: 24px;
+  }
+  .overlay h1 {
+    font-size: 64px; font-weight: 900; letter-spacing: 0.06em; color: #fff;
+    text-shadow: 0 4px 0 rgba(0,0,0,0.35), 0 0 42px rgba(42, 212, 196, 0.45);
+  }
+  .overlay h1 .sun { color: var(--accent); }
+  .overlay .tagline { font-size: 17px; color: #d8d8ce; margin-top: 8px; max-width: 560px; line-height: 1.55; }
+  .overlay .story { font-size: 14px; color: var(--muted); margin-top: 18px; max-width: 520px; line-height: 1.6; }
+  .big-button {
+    margin-top: 30px; padding: 14px 44px; font-size: 19px; font-weight: 800; letter-spacing: 0.08em;
+    color: #101418; background: var(--accent); border: none; border-radius: 10px; cursor: pointer;
+    box-shadow: 0 6px 24px rgba(255, 210, 62, 0.4);
+  }
+  .big-button:hover { filter: brightness(1.08); }
+  .overlay .hint { margin-top: 18px; font-size: 13px; color: var(--muted); line-height: 1.8; }
+  .overlay .hint b { color: var(--text); }
+  #pause-screen, #busted-screen, #wasted-screen { display: none; }
+  #busted-screen h1 { color: #6aa8ff; text-shadow: 0 4px 0 rgba(0,0,0,0.4), 0 0 42px rgba(80, 140, 255, 0.5); }
+  #wasted-screen h1 { color: #ff5040; text-shadow: 0 4px 0 rgba(0,0,0,0.4), 0 0 42px rgba(255, 60, 40, 0.5); }
+  .hidden { display: none !important; }
 </style>
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three.module.min.js"
+  }
+}
+</script>
 </head>
 <body>
-<div id="scene"></div>
+<canvas id="game-canvas"></canvas>
 
 <!-- HUD -->
-<div id="hud">
-  <div id="objective" class="panel">
-    <div class="kicker" id="objective-kicker">MISSION</div>
-    <div id="objective-text">Welcome to Solmar</div>
-    <div id="objective-dist"></div>
-  </div>
-  <div id="wanted" class="panel">
-    <span class="label">WANTED</span><span id="wanted-stars"></span>
-  </div>
-  <div id="stats" class="panel">
-    <div id="money"><span class="cur">$</span><span id="money-num">0</span></div>
-    <div class="bar-row"><span class="tag">HEALTH</span><div class="bar"><div id="health-fill"></div></div><span id="health-text">100</span></div>
-    <div id="ammo">PISTOL — AMMO 60</div>
-  </div>
-  <div id="minimap-wrap" class="panel"><canvas id="minimap" width="208" height="208"></canvas><div class="cap">SOLMAR</div></div>
-  <div id="prompt" class="panel"></div>
-  <div id="speed" class="panel"><div class="num" id="speed-num">0</div><div class="unit">KM/H</div></div>
-  <div id="crosshair"></div>
-  <div id="toast" class="panel"></div>
-  <div id="mission-card" class="panel">
-    <div class="kicker" id="mission-card-kicker">MISSION 1</div>
-    <div id="mission-card-title"></div>
-    <div id="mission-card-sub"></div>
-    <div id="mission-card-text"></div>
-  </div>
-  <div id="big-center"><div id="big-center-title"></div><div id="big-center-sub"></div></div>
-  <div id="hint" class="panel">
-    <b>WASD</b> move / drive &nbsp; <b>Mouse</b> look<br>
-    <b>E</b> enter car &nbsp; <b>Click</b> shoot &nbsp; <b>F</b> punch<br>
-    <b>Shift</b> sprint &nbsp; <b>Space</b> jump / handbrake &nbsp; <b>P</b> pause
-  </div>
+<div id="mission-card" class="panel">
+  <div class="mission-title" id="mission-title">FREE ROAM — SOLMAR</div>
+  <div class="mission-objective" id="mission-objective">Explore the city</div>
+  <div class="mission-distance" id="mission-distance"></div>
 </div>
-<div id="damage-flash"></div>
 
-<!-- Start menu -->
-<div id="menu" class="overlay">
-  <div class="sheet">
-    <div class="logo">Solmar</div>
-    <div class="tagline">AN OPEN-WORLD CRIME STORY</div>
-    <p class="story">Sun, salt air and bad decisions. <b>Dario "Daz" Ferran</b> came to
-    Solmar to drive straight — until his old friend <b>Lena Cross</b> called in a
-    debt and <b>Viktor Hale's</b> syndicate started squeezing the whole city.
-    Steal cars, outrun the Solmar PD, run six jobs across the city and take
-    Hale down. The city is yours to explore: drive it, walk it, own it.</p>
-    <button class="btn" id="btn-new">NEW GAME</button>
-    <button class="btn ghost" id="btn-continue">CONTINUE</button>
-    <button class="btn ghost" id="btn-how">HOW TO PLAY</button>
-    <div id="menu-save-note"></div>
-    <div id="howto">
-      <h3>ON FOOT</h3>
-      <p><span class="kbd">W</span><span class="kbd">A</span><span class="kbd">S</span><span class="kbd">D</span> move,
-      <span class="kbd">Shift</span> sprint, <span class="kbd">Space</span> jump. Click the game to lock the
-      mouse and look around. <span class="kbd">Click</span> fires your pistol, <span class="kbd">F</span> punches,
-      <span class="kbd">R</span> reloads.</p>
-      <h3>DRIVING</h3>
-      <p>Walk up to any car and press <span class="kbd">E</span> to get in — parked cars are free, but
-      taking one the city owns raises your wanted level. <span class="kbd">W</span> accelerates,
-      <span class="kbd">S</span> brakes and reverses, <span class="kbd">Space</span> is the handbrake.
-      Press <span class="kbd">E</span> again to get out.</p>
-      <h3>THE HEAT</h3>
-      <p>Crime raises your wanted stars (1–5). Police cars chase you and officers on foot will
-      arrest you if they catch you. Stay out of sight and out of trouble and the heat cools off.
-      Green crosses heal you, yellow crates refill ammo.</p>
-      <h3>MISSIONS</h3>
-      <p>Follow the golden beam and the blip on the minimap. Finish all six missions to take
-      Hale down. Progress and cash save automatically — and with <span class="kbd">P</span> → Save.</p>
-    </div>
-    <p class="fine">Solmar is an original game made for make.fun gta6-01. No network requests —
-    three.js is vendored locally and all sound is synthesized in code. Best played in
-    desktop Chrome with keyboard and mouse.</p>
+<div id="wanted-panel" class="panel">
+  <span class="label">Wanted</span>
+  <span id="wanted-stars"><span>★</span><span>★</span><span>★</span><span>★</span><span>★</span></span>
+</div>
+
+<div id="status-panel" class="panel">
+  <div id="hud-money">$50</div>
+  <div id="hud-health-row">
+    <span class="label">Health</span>
+    <div id="hud-health-bar-wrap"><div id="hud-health-bar"></div></div>
+    <span id="hud-health-num">100</span>
+  </div>
+  <div id="hud-ammo">PISTOL — 12 IN MAG · 48 RESERVE</div>
+</div>
+
+<div id="minimap-wrap" class="panel">
+  <canvas id="minimap" width="190" height="190"></canvas>
+  <span class="label">Solmar</span>
+</div>
+
+<div id="speed-panel" class="panel">
+  <div id="hud-speed">0</div>
+  <div class="label">km/h</div>
+</div>
+
+<div id="controls-help" class="panel">
+  <b>WASD</b> move / drive &nbsp; <b>Mouse</b> look<br>
+  <b>E</b> enter car &nbsp; <b>Click</b> shoot &nbsp; <b>F</b> punch<br>
+  <b>Shift</b> sprint &nbsp; <b>Space</b> jump / handbrake &nbsp; <b>P</b> pause
+</div>
+
+<div id="crosshair">+</div>
+<div id="toast" class="panel"></div>
+
+<!-- Start screen -->
+<div id="start-screen" class="overlay">
+  <h1>SOL<span class="sun">MAR</span></h1>
+  <div class="tagline">An open-world crime game in the sun. Steal cars, outrun the
+    Solmar Police, take jobs from the people who run this city — and try not to get busted.</div>
+  <div class="story">You are Rio, a driver fresh out of the marina lock-up with $50
+    and a borrowed pistol. The city is yours: five districts, a working waterfront,
+    and everyone in it watching what you do next.</div>
+  <button class="big-button" id="start-button">START ENGINE</button>
+  <div class="hint">
+    <b>WASD</b> move / drive &nbsp;·&nbsp; <b>Mouse</b> look &nbsp;·&nbsp; <b>E</b> enter / exit car<br>
+    <b>Click</b> shoot &nbsp;·&nbsp; <b>F</b> punch &nbsp;·&nbsp; <b>Shift</b> sprint &nbsp;·&nbsp; <b>Space</b> jump / handbrake &nbsp;·&nbsp; <b>P</b> pause
   </div>
 </div>
 
-<!-- Pause menu -->
-<div id="pause" class="overlay hidden">
-  <div class="sheet">
-    <div class="logo" style="font-size:44px">Paused</div>
-    <button class="btn" id="btn-resume">RESUME</button>
-    <button class="btn ghost" id="btn-save">SAVE GAME</button>
-    <button class="btn ghost" id="btn-restart">RESTART MISSION</button>
-    <button class="btn ghost" id="btn-quit">QUIT TO MENU</button>
-    <div id="pause-note"></div>
-    <div class="controls-grid">
-      <div><b>W A S D</b> move / drive</div><div><b>Mouse</b> look</div>
-      <div><b>E</b> enter / exit car</div><div><b>Click</b> shoot</div>
-      <div><b>F</b> punch</div><div><b>R</b> reload</div>
-      <div><b>Shift</b> sprint</div><div><b>Space</b> jump / handbrake</div>
-      <div><b>M</b> music on/off</div><div><b>C</b> camera distance</div>
-    </div>
-  </div>
+<!-- Pause screen -->
+<div id="pause-screen" class="overlay">
+  <h1>PAUSED</h1>
+  <div class="tagline">Solmar waits for no one — except right now.</div>
+  <button class="big-button" id="resume-button">RESUME</button>
+  <div class="hint">Press <b>P</b> to resume &nbsp;·&nbsp; <b>M</b> mute sound</div>
 </div>
 
-<!-- Wasted / busted / complete -->
-<div id="end" class="overlay hidden">
-  <div class="sheet">
-    <div id="end-title">WASTED</div>
-    <p id="end-text"></p>
-    <button class="btn" id="btn-retry">RETRY</button>
-    <button class="btn ghost" id="btn-end-menu">BACK TO MENU</button>
-  </div>
+<!-- Busted screen -->
+<div id="busted-screen" class="overlay">
+  <h1>BUSTED</h1>
+  <div class="tagline">The Solmar Police Department thanks you for your cooperation.</div>
+  <button class="big-button" id="busted-button">PAY THE FINE — TRY AGAIN</button>
 </div>
 
-<script type="importmap">
-{ "imports": { "three": "./vendor/three.module.min.js" } }
-</script>
+<!-- Wasted screen -->
+<div id="wasted-screen" class="overlay">
+  <h1>WASTED</h1>
+  <div class="tagline">Rio's story ends on a Solmar sidewalk. The city moves on.</div>
+  <button class="big-button" id="wasted-button">START OVER</button>
+</div>
+
 <script type="module" src="./src/main.js"></script>
 </body>
 </html>
