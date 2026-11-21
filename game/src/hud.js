@@ -1,211 +1,193 @@
 // Solmar — game/src/hud.js
-// Every DOM read and write for the HUD: money, health, ammo, speed, the
-// wanted stars, the mission card, toasts, the crosshair, the four screens
-// and the live minimap.
+// The HUD for Solmar: money, health and ammo panels, the wanted stars, the
+// mission card, a live minimap, toasts, the crosshair and the menu screens.
 //
-// The overlay bug the previous build hit: the stylesheet hides #toast,
-// #crosshair, #pause-screen, #busted-screen and #wasted-screen with
-// `display: none` on the ID selector, which beats an empty inline value.
-// So showing anything here always sets an EXPLICIT display value
-// ('block' for the toast and crosshair, 'flex' for the screens) — never
-// display = ''.
+// Display rule, learned the hard way: the page stylesheet hides the toast,
+// the crosshair and every menu screen with an ID selector (display: none).
+// An inline display of '' loses to that, so overlays shown that way stay
+// invisible forever. Every show/hide here sets an explicit value —
+// 'flex' or 'block' to show, 'none' to hide — never an empty string.
 
-import { CONFIG } from './config.js';
-import { formatMoney, formatSpeed, formatDistance } from './util.js';
+import { clamp } from './util.js';
 
-export class Hud {
-  constructor(city) {
-    this.city = city;
-    const $ = (id) => document.getElementById(id);
-    this.el = {
-      missionTitle: $('mission-title'),
-      missionObjective: $('mission-objective'),
-      missionDistance: $('mission-distance'),
-      wantedStars: $('wanted-stars'),
-      money: $('hud-money'),
-      healthBar: $('hud-health-bar'),
-      healthNum: $('hud-health-num'),
-      ammo: $('hud-ammo'),
-      speed: $('hud-speed'),
-      minimap: $('minimap'),
-      toast: $('toast'),
-      crosshair: $('crosshair'),
-      startScreen: $('start-screen'),
-      pauseScreen: $('pause-screen'),
-      bustedScreen: $('busted-screen'),
-      wastedScreen: $('wasted-screen'),
+function el(id) {
+  return document.getElementById(id);
+}
+
+export class HUD {
+  constructor() {
+    this.missionCard = el('mission-card');
+    this.missionTitle = el('mission-title');
+    this.missionObjective = el('mission-objective');
+    this.missionDistance = el('mission-distance');
+    this.wantedStars = el('wanted-stars');
+    this.money = el('hud-money');
+    this.healthBar = el('hud-health-bar');
+    this.healthNum = el('hud-health-num');
+    this.ammo = el('hud-ammo');
+    this.minimap = el('minimap');
+    this.mapCtx = this.minimap ? this.minimap.getContext('2d') : null;
+    this.speed = el('hud-speed');
+    this.crosshair = el('crosshair');
+    this.toastEl = el('toast');
+    this.controlsHelp = el('controls-help');
+    this.screens = {
+      start: el('start-screen'),
+      pause: el('pause-screen'),
+      busted: el('busted-screen'),
+      wasted: el('wasted-screen'),
     };
-    this.mapCtx = this.el.minimap ? this.el.minimap.getContext('2d') : null;
-    this._toastTimer = null;
-    this._screens = [this.el.startScreen, this.el.pauseScreen, this.el.bustedScreen, this.el.wastedScreen];
+    this._toastTimer = 0;
+    this._mode = 'menu';
   }
 
-  setMoney(n) {
-    if (this.el.money) this.el.money.textContent = formatMoney(n);
-  }
-
-  setHealth(hp) {
-    const v = Math.max(0, Math.min(100, Math.round(hp)));
-    if (this.el.healthBar) this.el.healthBar.style.width = `${v}%`;
-    if (this.el.healthNum) this.el.healthNum.textContent = String(v);
-  }
-
-  setAmmo(mag, reserve) {
-    if (this.el.ammo) this.el.ammo.textContent = `PISTOL — ${mag} IN MAG · ${reserve} RESERVE`;
-  }
-
-  setSpeed(ms) {
-    if (this.el.speed) this.el.speed.textContent = String(Math.round(formatSpeed(ms)));
-  }
-
-  setStars(level) {
-    const stars = this.el.wantedStars ? this.el.wantedStars.children : [];
-    for (let i = 0; i < stars.length; i++) {
-      stars[i].className = i < level ? 'lit' : '';
+  setMode(mode) {
+    this._mode = mode;
+    this.setCrosshair(mode === 'playing');
+    if (this.controlsHelp) {
+      this.controlsHelp.style.display = mode === 'playing' ? 'block' : 'none';
     }
   }
 
-  setMission(title, objective, distanceM = null) {
-    if (this.el.missionTitle) this.el.missionTitle.textContent = title;
-    if (this.el.missionObjective) this.el.missionObjective.textContent = objective;
-    if (this.el.missionDistance) {
-      this.el.missionDistance.textContent = distanceM === null ? '' : formatDistance(distanceM);
+  // Show one menu screen ('start' | 'pause' | 'busted' | 'wasted') or none.
+  showScreen(name) {
+    for (const [key, node] of Object.entries(this.screens)) {
+      if (!node) continue;
+      node.style.display = key === name ? 'flex' : 'none';
     }
+    if (name) this.setCrosshair(false);
   }
 
-  toast(text, ms = 2600) {
-    if (!this.el.toast) return;
-    this.el.toast.textContent = text;
-    // Explicit 'block': the stylesheet's #toast rule is display:none.
-    this.el.toast.style.display = 'block';
+  setCrosshair(on) {
+    if (!this.crosshair) return;
+    this.crosshair.style.display = on ? 'block' : 'none';
+  }
+
+  toast(text, ms = 3500) {
+    if (!this.toastEl) return;
+    this.toastEl.textContent = text;
+    this.toastEl.style.display = 'block';
     if (this._toastTimer) clearTimeout(this._toastTimer);
     this._toastTimer = setTimeout(() => {
-      this.el.toast.style.display = 'none';
+      this.toastEl.style.display = 'none';
     }, ms);
   }
 
-  setCrosshair(visible) {
-    if (!this.el.crosshair) return;
-    // Explicit 'block': the stylesheet's #crosshair rule is display:none.
-    this.el.crosshair.style.display = visible ? 'block' : 'none';
+  setMoney(n) {
+    if (this.money) this.money.textContent = '$' + String(Math.floor(n));
   }
 
-  hideScreens() {
-    for (const s of this._screens) if (s) s.style.display = 'none';
+  setHealth(hp) {
+    const v = clamp(Math.round(hp), 0, 100);
+    if (this.healthBar) this.healthBar.style.width = v + '%';
+    if (this.healthNum) this.healthNum.textContent = String(v);
   }
 
-  // name: 'start' | 'pause' | 'busted' | 'wasted' | null (hide all).
-  // Screens are flex-column overlays, so showing one sets 'flex'.
-  showScreen(name) {
-    this.hideScreens();
-    const map = {
-      start: this.el.startScreen,
-      pause: this.el.pauseScreen,
-      busted: this.el.bustedScreen,
-      wasted: this.el.wastedScreen,
-    };
-    const el = name ? map[name] : null;
-    if (el) el.style.display = 'flex';
+  setAmmo(mag, reserve) {
+    if (this.ammo) this.ammo.textContent = `PISTOL — ${mag} IN MAG · ${reserve} RESERVE`;
   }
 
-  drawMinimap(data) {
+  setWanted(stars) {
+    if (!this.wantedStars) return;
+    const lit = clamp(Math.round(stars), 0, 5);
+    this.wantedStars.textContent = '★'.repeat(lit) + '☆'.repeat(5 - lit);
+  }
+
+  setSpeed(ms) {
+    if (this.speed) this.speed.textContent = String(Math.round(ms * 3.6));
+  }
+
+  setMission(title, objective, distanceM) {
+    if (this.missionTitle) this.missionTitle.textContent = title;
+    if (this.missionObjective) this.missionObjective.textContent = objective;
+    if (this.missionDistance) {
+      this.missionDistance.textContent = distanceM === null || distanceM === undefined
+        ? ''
+        : Math.round(distanceM) + ' m';
+    }
+  }
+
+  // Live minimap. view = { player: {x, z, heading}, mission: {x, z}|null,
+  // police: [{x, z}], enemies: [{x, z}], traffic: [{x, z}] }.
+  drawMinimap(city, view) {
+    if (!this.mapCtx || !this.minimap) return;
     const ctx = this.mapCtx;
-    if (!ctx || !this.city) return;
-    const size = 190;
-    const range = CONFIG.hud.minimapRange;
-    const scale = size / range;
-    const px = data.playerX;
-    const pz = data.playerZ;
-    const toX = (x) => size / 2 + (x - px) * scale;
-    const toY = (z) => size / 2 + (z - pz) * scale;
+    const W = this.minimap.width || 180;
+    const H = this.minimap.height || 180;
+    if (this.minimap.width !== W) this.minimap.width = W;
+    if (this.minimap.height !== H) this.minimap.height = H;
+    const b = city.bounds;
+    const sx = W / (b.maxX - b.minX);
+    const sz = H / (b.maxZ - b.minZ);
+    const X = (x) => (x - b.minX) * sx;
+    const Z = (z) => (z - b.minZ) * sz;
 
-    ctx.clearRect(0, 0, size, size);
-    ctx.fillStyle = '#20242c';
-    ctx.fillRect(0, 0, size, size);
-
-    // Water along the south edge (the marina, positive z).
-    const bounds = this.city.bounds;
-    const waterTop = toY(bounds.maxZ - 26);
-    ctx.fillStyle = '#2f7fb8';
-    ctx.fillRect(0, Math.max(0, waterTop), size, size);
-
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#1c2733';
+    ctx.fillRect(0, 0, W, H);
+    // Marina water along the south edge.
+    ctx.fillStyle = '#2a6a9a';
+    ctx.fillRect(0, Z(b.maxZ) - 8, W, 8);
     // Roads.
-    ctx.strokeStyle = '#3a3b40';
-    ctx.lineWidth = 7;
-    for (const road of this.city.roads ?? []) {
+    ctx.strokeStyle = '#5a6a7a';
+    ctx.lineWidth = 4;
+    for (const road of city.roads || []) {
       ctx.beginPath();
       if (road.axis === 'x') {
-        ctx.moveTo(toX(road.x - road.length / 2), toY(road.z));
-        ctx.lineTo(toX(road.x + road.length / 2), toY(road.z));
+        ctx.moveTo(X(road.x - road.length / 2), Z(road.z));
+        ctx.lineTo(X(road.x + road.length / 2), Z(road.z));
       } else {
-        ctx.moveTo(toX(road.x), toY(road.z - road.length / 2));
-        ctx.lineTo(toX(road.x), toY(road.z + road.length / 2));
+        ctx.moveTo(X(road.x), Z(road.z - road.length / 2));
+        ctx.lineTo(X(road.x), Z(road.z + road.length / 2));
       }
       ctx.stroke();
     }
-
     // Landmarks.
-    const marks = this.city.landmarks ?? {};
-    const dots = [
-      [marks.spawn, '#ffffff'],
-      [marks.marina, '#6db7ff'],
-      [marks.docks, '#ff9a3d'],
-      [marks.bank, '#5ad06a'],
-      [marks.hospital, '#ffffff'],
-    ];
-    for (const [pt, color] of dots) {
-      if (!pt) continue;
-      ctx.fillStyle = color;
+    for (const [name, lm] of Object.entries(city.landmarks || {})) {
+      ctx.fillStyle = name === 'safehouse' ? '#e8b820' : '#8ec9e8';
       ctx.beginPath();
-      ctx.arc(toX(pt.x), toY(pt.z), 2.5, 0, Math.PI * 2);
+      ctx.arc(X(lm.x), Z(lm.z), 3, 0, Math.PI * 2);
       ctx.fill();
     }
-    // Safehouse: a ring, so the job beacon is easy to spot.
-    if (marks.safehouse) {
-      ctx.strokeStyle = '#f2c230';
+    // Traffic.
+    ctx.fillStyle = '#9aa8b8';
+    for (const t of view.traffic || []) {
+      ctx.fillRect(X(t.x) - 1, Z(t.z) - 1, 2, 2);
+    }
+    // Enemies.
+    ctx.fillStyle = '#ff8030';
+    for (const e of view.enemies || []) {
+      ctx.beginPath();
+      ctx.arc(X(e.x), Z(e.z), 3, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Police.
+    ctx.fillStyle = '#ff4040';
+    for (const p of view.police || []) {
+      ctx.beginPath();
+      ctx.arc(X(p.x), Z(p.z), 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // Mission target ring.
+    if (view.mission) {
+      ctx.strokeStyle = '#e8b820';
       ctx.lineWidth = 2;
       ctx.beginPath();
-      ctx.arc(toX(marks.safehouse.x), toY(marks.safehouse.z), 5, 0, Math.PI * 2);
+      ctx.arc(X(view.mission.x), Z(view.mission.z), 6, 0, Math.PI * 2);
       ctx.stroke();
     }
-
-    // Mission target: a pulsing yellow ring.
-    if (data.mission) {
-      const pulse = 6 + Math.sin(data.time * 4) * 2;
-      ctx.strokeStyle = '#f2c230';
-      ctx.lineWidth = 2.5;
+    // Player arrow.
+    if (view.player) {
+      const px = X(view.player.x);
+      const pz = Z(view.player.z);
+      const a = view.player.heading || 0;
+      ctx.fillStyle = '#ffffff';
       ctx.beginPath();
-      ctx.arc(toX(data.mission.x), toY(data.mission.z), pulse, 0, Math.PI * 2);
-      ctx.stroke();
+      ctx.moveTo(px + Math.sin(a) * 6, pz + Math.cos(a) * 6);
+      ctx.lineTo(px + Math.sin(a + 2.5) * 5, pz + Math.cos(a + 2.5) * 5);
+      ctx.lineTo(px + Math.sin(a - 2.5) * 5, pz + Math.cos(a - 2.5) * 5);
+      ctx.closePath();
+      ctx.fill();
     }
-
-    // Traffic (pale), police (blue), enemies (red).
-    const dot = (list, color, r) => {
-      ctx.fillStyle = color;
-      for (const p of list ?? []) {
-        ctx.beginPath();
-        ctx.arc(toX(p.x), toY(p.z), r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-    };
-    dot(data.traffic, '#b9bec8', 1.8);
-    dot(data.police, '#4d9fff', 2.6);
-    dot(data.enemies, '#ff4030', 2.6);
-
-    // Player: a white arrow in the facing direction.
-    const fx = Math.sin(data.heading);
-    const fz = Math.cos(data.heading);
-    const cx = size / 2;
-    const cy = size / 2;
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2.5;
-    ctx.beginPath();
-    ctx.moveTo(cx, cy);
-    ctx.lineTo(cx + fx * 11, cy + fz * 11);
-    ctx.stroke();
-    ctx.fillStyle = '#ffffff';
-    ctx.beginPath();
-    ctx.arc(cx, cy, 3, 0, Math.PI * 2);
-    ctx.fill();
   }
 }

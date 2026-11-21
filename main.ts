@@ -1,39 +1,34 @@
-// Solmar — main.ts (Node 22, standard library only)
-// Hands the game in: copies this repository's game/ and screenshots/
-// beside this file into /output (or MAKEFUN_OUTPUT_DIR outside the
-// grader) and writes /output/dossier.json with the vendored make.fun
-// library. No network, no installs, no build step: the same bytes come
-// out every run, so the grader's two runs agree.
+// Solmar — build script (main.ts)
+// Copies the game and its screenshots into the output directory and writes
+// the dossier the competition reads. Standard library only; the dossier
+// rules come from the kit's vendor/makefun-game.ts.
 //
-//   mkdir -p out && MAKEFUN_OUTPUT_DIR=out node main.ts
+// Usage: node main.ts            (writes to $MAKEFUN_OUTPUT_DIR or /output)
 
-import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { buildDossier } from './vendor/makefun-game.ts';
 
-const repoRoot = fileURLToPath(new URL('.', import.meta.url));
-const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? '/output';
+const repo = resolve(import.meta.dirname);
+const out = process.env.MAKEFUN_OUTPUT_DIR || '/output';
 
-mkdirSync(outDir, { recursive: true });
-cpSync(join(repoRoot, 'game'), join(outDir, 'game'), { recursive: true });
+rmSync(out, { recursive: true, force: true });
+mkdirSync(out, { recursive: true });
 
-const shotsDir = join(repoRoot, 'screenshots');
-mkdirSync(join(outDir, 'screenshots'), { recursive: true });
-if (existsSync(shotsDir)) {
-  cpSync(shotsDir, join(outDir, 'screenshots'), { recursive: true });
-}
+const gameDir = join(repo, 'game');
+if (existsSync(gameDir)) cpSync(gameDir, join(out, 'game'), { recursive: true });
 
-// The scorer's caps, from the competition's gate: at most 4 screenshots
-// of 256 KiB, at most 993 files / 48 MiB under game/, paths under
-// 1000 bytes, and the dossier text capped at 160 KiB.
-writeFileSync(
-  join(outDir, 'dossier.json'),
-  buildDossier(outDir, {
-    text_max_bytes: 163840,
-    screenshots: { max: 4, max_bytes: 262144 },
-    game_max_files: 993,
-    game_max_bytes: 50331648,
-    game_path_max_bytes: 1000,
-  }),
-);
+const shotsDir = join(repo, 'screenshots');
+if (existsSync(shotsDir)) cpSync(shotsDir, join(out, 'screenshots'), { recursive: true });
+
+// buildDossier returns the dossier bytes; the caller writes them out.
+const dossier = buildDossier(out, {
+  text_max_bytes: 163840,
+  screenshots: { max: 4, max_bytes: 262144 },
+  game_max_files: 993,
+  game_max_bytes: 50331648,
+  game_path_max_bytes: 1000,
+});
+writeFileSync(join(out, 'dossier.json'), dossier);
+
+console.log(`Solmar build written to ${out}`);

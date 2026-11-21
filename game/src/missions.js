@@ -1,442 +1,361 @@
 // Solmar — game/src/missions.js
-// Six story jobs for Dario "Daz" Ferran, handed out by the fixer Lena,
-// against the developer Viktor Hale. Jobs unlock in order from the
-// safehouse beacon; failing one (busted or wasted) sends Daz back to
-// the safehouse to try again — the job index does not move.
+// Story missions for Solmar. Dario "Daz" Ferran runs jobs for the fixer
+// Lena against Viktor Hale. Missions unlock one after another from the
+// safehouse beacon: walk to the yellow marker with no mission active and
+// the next job starts. A bust or a trip to the hospital fails the current
+// job back to the safehouse — the job itself is not lost.
 //
-// Steps are small data: goto / enterCar / driveTo / stealCar / fight /
-// collect / wait / drops. The system owns the beacon, the client, the
-// package and the enemies of the current step, and nothing else.
+// Steps are data: reach a place, get in a car, deliver by car, defeat a
+// group of enemies, or wait in a zone. The class owns the beacon marker
+// and the small job props (client, package, ledger) it spawns.
 
-import { createCar } from './vehicles.js';
-import { createPedestrian } from './actors.js';
+function personMesh(THREE, shirt) {
+  const g = new THREE.Group();
+  const mat = (c) => new THREE.MeshLambertMaterial({ color: c });
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.75, 0.34), mat(shirt));
+  torso.position.y = 1.05;
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.32, 0.32), mat(0xe8b88a));
+  head.position.y = 1.6;
+  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.68, 0.24), mat(0x2a344a));
+  legL.position.set(-0.15, 0.34, 0);
+  const legR = legL.clone();
+  legR.position.x = 0.15;
+  g.add(torso, head, legL, legR);
+  return g;
+}
 
-const LAND = (city, key) => city.landmarks[key];
+function propMesh(THREE, color) {
+  const g = new THREE.Group();
+  const box = new THREE.Mesh(
+    new THREE.BoxGeometry(0.55, 0.4, 0.4),
+    new THREE.MeshLambertMaterial({ color }),
+  );
+  box.position.y = 0.35;
+  const lid = new THREE.Mesh(
+    new THREE.BoxGeometry(0.57, 0.08, 0.42),
+    new THREE.MeshLambertMaterial({ color: 0xe8b820 }),
+  );
+  lid.position.y = 0.58;
+  g.add(box, lid);
+  return g;
+}
 
 export const MISSION_DEFS = [
   {
-    id: 'm1',
-    title: 'The Pickup',
-    briefing: 'Lena needs a client taken to the marina. Get a car first.',
-    reward: 250,
+    id: 0, title: 'M1 — The Pickup', payout: 250,
+    briefing: 'Lena has a client who needs a quiet ride to the marina.',
     steps: [
-      { type: 'goto', point: 'spawn', dx: 18, dz: -12, radius: 4, text: 'Meet the client near the plaza' },
-      { type: 'enterCar', text: 'Get in a car — the client rides with you' },
-      { type: 'driveTo', point: 'marina', radius: 8, text: 'Drive the client to the marina' },
+      { kind: 'enterCar', text: 'Get in a car — the client rides with you' },
+      { kind: 'deliver', target: 'marina', radius: 14, text: 'Drive the client to the marina' },
     ],
   },
   {
-    id: 'm2',
-    title: 'Hot Wheels',
-    briefing: 'A sport car is parked by the bank. Take it to the docks.',
-    reward: 600,
+    id: 1, title: 'M2 — The Lift', payout: 600,
+    briefing: 'Lena needs a clean car. Take one and bring it to the docks.',
     steps: [
-      { type: 'stealCar', point: 'bank', dx: -10, dz: 8, radius: 5, text: 'Steal the sport car by the bank' },
-      { type: 'driveTo', point: 'docks', radius: 8, text: 'Deliver the car to the docks' },
+      { kind: 'enterCar', text: 'Steal a car — any car will do' },
+      { kind: 'deliver', target: 'docks', radius: 14, text: 'Deliver the car to the docks' },
     ],
   },
   {
-    id: 'm3',
-    title: 'Dockside Trouble',
-    briefing: 'Hale’s thugs are holding a package at the docks. Take it back.',
-    reward: 800,
+    id: 2, title: 'M3 — Dockside', payout: 800,
+    briefing: 'Hale’s crew is holding a package at the docks. Take it back.',
     steps: [
-      { type: 'goto', point: 'docks', radius: 8, text: 'Head to the docks' },
-      { type: 'fight', point: 'docks', kinds: ['thug', 'thug', 'thug'], radius: 30, text: 'Deal with the thugs' },
-      { type: 'collect', point: 'docks', dx: 4, dz: 2, radius: 3, item: 'package', text: 'Grab the package' },
-      { type: 'goto', point: 'safehouse', radius: 8, text: 'Bring the package to the safehouse' },
+      { kind: 'reach', target: 'docks', radius: 16, text: 'Head to the docks' },
+      { kind: 'defeat', kinds: ['thug', 'thug', 'thug'], text: 'Deal with the thugs' },
+      { kind: 'reach', target: 'package', radius: 4, text: 'Grab the package' },
     ],
   },
   {
-    id: 'm4',
-    title: 'The Bank Job',
-    briefing: 'Crack the bank safe. The alarm will bring the whole SPD.',
-    reward: 900,
+    id: 3, title: 'M4 — The Vault', payout: 900,
+    briefing: 'The bank vault is soft. Crack it — and be ready to run.',
     steps: [
-      { type: 'goto', point: 'bank', radius: 8, text: 'Get to the bank' },
-      { type: 'wait', point: 'bank', radius: 7, seconds: 8, text: 'Crack the safe — stay close', alarm: true },
-      { type: 'driveTo', point: 'safehouse', radius: 8, text: 'Lose the heat — get to the safehouse' },
+      { kind: 'reach', target: 'bank', radius: 16, text: 'Get to the bank' },
+      { kind: 'wait', target: 'bank', radius: 12, seconds: 5, text: 'Crack the safe — stay close' },
+      { kind: 'deliver', target: 'safehouse', radius: 14, text: 'Lose the cops — get to the safehouse' },
     ],
   },
   {
-    id: 'm5',
-    title: 'Dead Drops',
-    briefing: 'Three drops, three corners of the city. Don’t get followed.',
-    reward: 700,
+    id: 4, title: 'M5 — Dead Drops', payout: 700,
+    briefing: 'Three drops, three corners of the city. No noise, no witnesses.',
     steps: [
-      { type: 'drops', points: ['hospital', 'marina', 'docks'], radius: 6, text: 'Make the dead drops' },
+      { kind: 'reach', target: 'marina', radius: 12, text: 'Drop one: the marina' },
+      { kind: 'reach', target: 'bank', radius: 12, text: 'Drop two: the bank' },
+      { kind: 'reach', target: 'hospital', radius: 12, text: 'Drop three: the hospital' },
     ],
   },
   {
-    id: 'm6',
-    title: 'The Ledger',
-    briefing: 'Hale keeps his ledger at the docks. End this.',
-    reward: 900,
+    id: 5, title: 'M6 — The Ledger', payout: 900,
+    briefing: 'Hale keeps his ledger at the docks. End it there.',
     steps: [
-      { type: 'goto', point: 'docks', radius: 8, text: 'Get to the docks' },
-      { type: 'fight', point: 'docks', kinds: ['hale', 'guard', 'guard', 'guard'], radius: 30, text: 'Take down Hale and his guards' },
-      { type: 'collect', point: 'docks', dx: -4, dz: -2, radius: 3, item: 'ledger', text: 'Take the ledger' },
-      { type: 'goto', point: 'safehouse', radius: 8, text: 'Bring the ledger home' },
+      { kind: 'reach', target: 'docks', radius: 16, text: 'Meet Hale at the docks' },
+      { kind: 'defeat', kinds: ['hale', 'guard', 'guard', 'guard'], text: 'Take down Hale and his guards' },
+      { kind: 'reach', target: 'ledger', radius: 4, text: 'Recover the ledger' },
     ],
   },
 ];
 
-export class MissionSystem {
-  constructor(scene, THREE, city, deps) {
-    this.scene = scene;
-    this.THREE = THREE;
-    this.city = city;
-    this.combat = deps.combat;
-    this.wanted = deps.wanted;
-    this.sfx = deps.sfx ?? null;
-    this.game = deps.game; // for addMoney / toast / addCrime
-    this.cars = deps.cars; // shared array (target cars get pushed here)
-    this.index = 0; // next mission to start
-    this.completed = [];
-    this.storyDone = false;
-    this.active = null; // { def, stepIndex, runtime }
-    this.beacon = null; // { group, ring, getPos }
+export class Missions {
+  // game facade: { THREE, scene, landmarks, combat, wanted, hud,
+  //   playerPos(), currentCar(), addMoney(n), onMissionDone(def),
+  //   saveProgress(), playSuccess() }
+  constructor(game) {
+    this.game = game;
+    this.THREE = game.THREE;
+    this.index = game.startMissionIndex || 0;
+    this.active = false;
+    this.step = 0;
+    this.waitLeft = 0;
+    this.spawned = []; // enemy kinds alive for the current defeat step
+    this.props = []; // { group, kind: 'client'|'package'|'ledger' }
+    this.clientAboard = false;
+    this.beacon = this._makeBeacon();
+    game.scene.add(this.beacon);
+    this._refreshBeacon();
   }
 
-  get currentDef() {
-    return this.active ? this.active.def : null;
-  }
-
-  startMission(i) {
-    if (this.active || i < 0 || i >= MISSION_DEFS.length) return false;
-    const def = MISSION_DEFS[i];
-    this.active = { def, stepIndex: 0, runtime: this._newRuntime() };
-    if (this.game) this.game.toast(`${def.id.toUpperCase()} — ${def.title}: ${def.briefing}`, 4200);
-    if (this.sfx) this.sfx.success();
-    this._startStep();
-    return true;
-  }
-
-  startNext() {
-    return this.startMission(this.index);
-  }
-
-  fail(reason) {
-    if (!this.active) return;
-    const def = this.active.def;
-    this._clearStep();
-    this.active = null;
-    if (this.game) this.game.toast(`Job failed (${reason}) — see Lena at the safehouse`, 3600);
-    if (this.sfx) this.sfx.fail();
-    void def;
-  }
-
-  onEnemyKilled(enemy) {
-    const a = this.active;
-    if (!a) return;
-    const rt = a.runtime;
-    if (rt.fightEnemies.includes(enemy)) {
-      rt.fightRemaining -= 1;
-      if (rt.fightRemaining <= 0) this._advance();
-    }
-  }
-
-  _newRuntime() {
-    return {
-      timer: 0,
-      subIndex: 0,
-      fightEnemies: [],
-      fightRemaining: 0,
-      targetCar: null,
-      clientPed: null,
-      itemMesh: null,
-      alarmRaised: false,
-    };
-  }
-
-  _pointOf(step) {
-    if (step.point) {
-      const base = LAND(this.city, step.point);
-      return { x: base.x + (step.dx ?? 0), z: base.z + (step.dz ?? 0) };
-    }
-    return null;
-  }
-
-  _startStep() {
-    const a = this.active;
-    if (!a) return;
-    const step = a.def.steps[a.stepIndex];
-    const rt = a.runtime;
-    rt.timer = 0;
-    rt.subIndex = 0;
-    const pt = this._pointOf(step);
-
-    if (step.type === 'goto' && a.stepIndex === 0 && a.def.id === 'm1') {
-      // The client waits at the meeting point.
-      rt.clientPed = createPedestrian(this.scene, this.THREE, pt.x, pt.z, { shirt: 0xe8b820, pants: 0x2a2c30, skin: 0xd8a077 });
-    }
-    if (step.type === 'stealCar') {
-      const car = createCar(this.scene, this.THREE, 'sport', pt.x, pt.z, Math.PI / 2);
-      car.isMissionTarget = true;
-      this.scene.add(car.group);
-      this.cars.push(car);
-      rt.targetCar = car;
-    }
-    if (step.type === 'fight') {
-      rt.fightEnemies = [];
-      step.kinds.forEach((kind, i) => {
-        const angle = (i / step.kinds.length) * Math.PI * 2;
-        const e = this.combat.spawnEnemy(kind, pt.x + Math.cos(angle) * 7, pt.z + Math.sin(angle) * 7);
-        rt.fightEnemies.push(e);
-      });
-      rt.fightRemaining = step.kinds.length;
-    }
-    if (step.type === 'collect') {
-      const color = step.item === 'ledger' ? 0xf5e6a8 : 0xf2c230;
-      const mesh = new this.THREE.Mesh(
-        new this.THREE.BoxGeometry(0.7, 0.45, 0.5),
-        new this.THREE.MeshBasicMaterial({ color }),
-      );
-      mesh.position.set(pt.x, 0.6, pt.z);
-      this.scene.add(mesh);
-      rt.itemMesh = mesh;
-    }
-    if (step.type === 'wait' && step.alarm && !rt.alarmRaised) {
-      rt.alarmRaised = true;
-      this.wanted.setStars(3, 0);
-      if (this.game) this.game.toast('The alarm is screaming — the whole SPD is coming', 3600);
-    }
-    this._makeBeacon(step);
-  }
-
-  _makeBeacon(step) {
-    this._clearBeacon();
-    const target = this._stepTarget(step);
-    if (!target) return;
-    const group = new this.THREE.Group();
-    const beam = new this.THREE.Mesh(
-      new this.THREE.CylinderGeometry(1.4, 1.4, 34, 12, 1, true),
-      new this.THREE.MeshBasicMaterial({ color: 0xf2c230, transparent: true, opacity: 0.22, side: this.THREE.DoubleSide, depthWrite: false }),
-    );
-    beam.position.y = 17;
+  _makeBeacon() {
+    const g = new this.THREE.Group();
     const ring = new this.THREE.Mesh(
-      new this.THREE.RingGeometry(2.1, 2.7, 24),
-      new this.THREE.MeshBasicMaterial({ color: 0xf2c230, transparent: true, opacity: 0.85, side: this.THREE.DoubleSide, depthWrite: false }),
+      new this.THREE.RingGeometry(2.2, 3, 32),
+      new this.THREE.MeshBasicMaterial({ color: 0xe8b820, side: this.THREE.DoubleSide, transparent: true, opacity: 0.85 }),
     );
     ring.rotation.x = -Math.PI / 2;
-    ring.position.y = 0.15;
-    group.add(beam);
-    group.add(ring);
-    group.position.set(target.x, 0, target.z);
-    this.scene.add(group);
-    this.beacon = { group, ring, step };
+    ring.position.y = 0.06;
+    const beam = new this.THREE.Mesh(
+      new this.THREE.CylinderGeometry(0.7, 0.7, 26, 12, 1, true),
+      new this.THREE.MeshBasicMaterial({ color: 0xe8b820, transparent: true, opacity: 0.16, side: this.THREE.DoubleSide, depthWrite: false }),
+    );
+    beam.position.y = 13;
+    g.add(ring, beam);
+    return g;
   }
 
-  _clearBeacon() {
-    if (!this.beacon) return;
-    this.scene.remove(this.beacon.group);
-    this.beacon = null;
+  _landmark(name) {
+    if (name === 'package' || name === 'ledger') {
+      const prop = this.props.find((p) => p.kind === name);
+      return prop ? { x: prop.group.position.x, z: prop.group.position.z } : this.game.landmarks.docks;
+    }
+    return this.game.landmarks[name] || { x: 0, z: 0 };
   }
 
-  // Where the beacon (and the HUD distance) points for this step.
-  _stepTarget(step) {
-    const rt = this.active ? this.active.runtime : null;
-    if (step.type === 'stealCar' && rt?.targetCar) {
-      const c = rt.targetCar;
-      return { x: c.group.position.x, z: c.group.position.z };
-    }
-    if (step.type === 'drops') {
-      const key = step.points[Math.min(rt?.subIndex ?? 0, step.points.length - 1)];
-      const base = LAND(this.city, key);
-      return { x: base.x, z: base.z };
-    }
-    if (step.type === 'enterCar' || step.type === 'fight') {
-      if (step.type === 'fight') return this._pointOf(step);
+  _clearProps() {
+    for (const p of this.props) this.game.scene.remove(p.group);
+    this.props = [];
+    this.clientAboard = false;
+  }
+
+  _spawnProp(kind, where) {
+    const lm = this.game.landmarks[where] || { x: 0, z: 0 };
+    const mesh = kind === 'client'
+      ? personMesh(this.THREE, 0xe8e8e8)
+      : propMesh(this.THREE, kind === 'ledger' ? 0x8a2a20 : 0x3a6a8a);
+    mesh.position.set(lm.x + 3, 0, lm.z + 3);
+    this.game.scene.add(mesh);
+    this.props.push({ group: mesh, kind });
+    return mesh;
+  }
+
+  get def() {
+    return MISSION_DEFS[this.index] || null;
+  }
+
+  get done() {
+    return this.index >= MISSION_DEFS.length;
+  }
+
+  currentStep() {
+    if (!this.active || !this.def) return null;
+    return this.def.steps[this.step] || null;
+  }
+
+  targetPos() {
+    if (!this.active) return this.game.landmarks.safehouse;
+    const step = this.currentStep();
+    if (!step) return this.game.landmarks.safehouse;
+    if (step.kind === 'enterCar' || step.kind === 'defeat') {
+      // No fixed target: point at the job site (docks for fights, self for cars).
+      if (step.kind === 'defeat') return this.game.landmarks.docks;
       return null;
     }
-    return this._pointOf(step);
+    return this._landmark(step.target);
   }
 
-  _clearStep() {
-    const a = this.active;
-    if (!a) return;
-    const rt = a.runtime;
-    this._clearBeacon();
-    if (rt.clientPed) {
-      this.scene.remove(rt.clientPed.group);
-      rt.clientPed = null;
+  objectiveText() {
+    if (this.done) return 'All jobs done — Solmar is yours, Daz.';
+    if (!this.active) return 'Work waits at the safehouse — follow the yellow marker';
+    const step = this.currentStep();
+    return step ? step.text : '';
+  }
+
+  titleText() {
+    if (this.done) return 'FREE ROAM — SOLMAR';
+    if (!this.active) return 'FREE ROAM — SOLMAR';
+    return this.def.title;
+  }
+
+  start(index) {
+    if (this.done) return;
+    this.index = index;
+    this.active = true;
+    this.step = 0;
+    this.waitLeft = 0;
+    this._clearProps();
+    const def = this.def;
+    if (def.id === 0) this._spawnProp('client', 'safehouse');
+    this.game.hud.toast(`${def.title} — ${def.briefing}`, 5000);
+    if (this.game.sfx) this.game.sfx.success();
+    this._beginStep();
+    this._refreshBeacon();
+  }
+
+  _beginStep() {
+    const step = this.currentStep();
+    if (!step) return;
+    this.waitLeft = step.seconds || 0;
+    if (step.kind === 'defeat') {
+      const at = this.game.landmarks.docks;
+      this.spawned = step.kinds.map((kind, i) => {
+        const angle = (i / step.kinds.length) * Math.PI * 2;
+        return this.game.combat.spawnEnemy(kind, at.x + Math.cos(angle) * 8, at.z + Math.sin(angle) * 8);
+      });
     }
-    if (rt.itemMesh) {
-      this.scene.remove(rt.itemMesh);
-      rt.itemMesh = null;
+    if (step.kind === 'reach' && step.target === 'package') {
+      this._spawnProp('package', 'docks');
     }
-    // A stolen target car stays in the world (it is a normal car now);
-    // its mission flag is cleared so nothing else treats it specially.
-    if (rt.targetCar) {
-      rt.targetCar.isMissionTarget = false;
-      rt.targetCar = null;
+    if (step.kind === 'reach' && step.target === 'ledger') {
+      this._spawnProp('ledger', 'docks');
     }
-    // Any fight enemies still standing are pulled out of the world when
-    // the step ends (a failed job must not leave thugs hunting the player).
-    for (const e of rt.fightEnemies) {
-      if (!e.dead) this.combat.removeEnemy(e);
+    if (step.kind === 'wait') {
+      // Tripping the safe trips the alarm: three stars of heat.
+      this.game.wanted.addPoints(95);
+      this.game.hud.toast('The alarm is tripped — the cops are coming!', 4000);
     }
-    rt.fightEnemies = [];
-    rt.fightRemaining = 0;
   }
 
   _advance() {
-    const a = this.active;
-    if (!a) return;
-    this._clearStep();
-    a.stepIndex += 1;
-    a.runtime = this._newRuntime();
-    if (a.stepIndex >= a.def.steps.length) {
-      this._completeMission();
+    this.step++;
+    if (this.step >= this.def.steps.length) {
+      this._complete();
       return;
     }
-    if (this.sfx) this.sfx.pickup();
-    this._startStep();
+    this._beginStep();
+    this._refreshBeacon();
   }
 
-  _completeMission() {
-    const a = this.active;
-    const def = a.def;
-    this.active = null;
-    this.completed[this.index] = true;
-    this.index += 1;
-    if (this.index >= MISSION_DEFS.length) this.storyDone = true;
-    if (this.game) {
-      this.game.addMoney(def.reward);
-      this.game.toast(`Job done — ${def.title} paid $${def.reward}`, 3600);
-    }
-    if (this.sfx) this.sfx.success();
-    if (this.game) this.game.autosave();
+  _complete() {
+    const def = this.def;
+    this.game.addMoney(def.payout);
+    this.game.hud.toast(`${def.title} done — +$${def.payout}`, 4500);
+    if (this.game.sfx) this.game.sfx.success();
+    this.active = false;
+    this.step = 0;
+    this._clearProps();
+    this.index++;
+    const storyDone = this.index >= MISSION_DEFS.length;
+    if (this.game.onMissionDone) this.game.onMissionDone(def, storyDone);
+    if (this.game.saveProgress) this.game.saveProgress();
+    this._refreshBeacon();
   }
 
-  _distTo(playerPos, pt) {
-    return Math.hypot(pt.x - playerPos.x, pt.z - playerPos.z);
+  // Called when the player is busted or wasted: the job fails back to the
+  // safehouse, the job itself stays open for another try.
+  failCurrent() {
+    if (!this.active) return;
+    this.active = false;
+    this.step = 0;
+    this.spawned = [];
+    this._clearProps();
+    if (this.game.combat) this.game.combat.clear();
+    this._refreshBeacon();
   }
 
-  update(dt, ctx) {
-    const a = this.active;
-    if (!a) return;
-    const step = a.def.steps[a.stepIndex];
-    const rt = a.runtime;
-    const pp = ctx.playerPos;
-
-    // The beacon follows a moving target (the steal car).
-    if (this.beacon && step.type === 'stealCar' && rt.targetCar) {
-      this.beacon.group.position.set(rt.targetCar.group.position.x, 0, rt.targetCar.group.position.z);
+  // Called when the player gets into a car (for enterCar steps and to hide
+  // the M1 client once they are aboard).
+  onEnterCar() {
+    if (this.active) {
+      const step = this.currentStep();
+      if (step && step.kind === 'enterCar') {
+        const client = this.props.find((p) => p.kind === 'client');
+        if (client) {
+          client.group.visible = false;
+          this.clientAboard = true;
+        }
+        this._advance();
+        return;
+      }
     }
-    if (this.beacon) {
-      const pulse = 0.16 + Math.sin(ctx.time * 3.5) * 0.07;
-      this.beacon.group.children[0].material.opacity = pulse;
+  }
+
+  update(dt) {
+    // Beacon idle spin.
+    this.beacon.rotation.y += dt * 0.4;
+    const p = this.game.playerPos();
+    if (!p) return;
+
+    if (!this.active) {
+      // Free roam: reaching the safehouse starts the next job.
+      if (!this.done) {
+        const sh = this.game.landmarks.safehouse;
+        if (Math.hypot(p.x - sh.x, p.z - sh.z) < 10) this.start(this.index);
+      }
+      return;
     }
 
-    switch (step.type) {
-      case 'goto':
-      case 'driveTo': {
-        const pt = this._pointOf(step);
-        const needCar = step.type === 'driveTo';
-        if ((!needCar || ctx.inCar) && this._distTo(pp, pt) <= step.radius) {
-          if (rt.clientPed) {
-            this.scene.remove(rt.clientPed.group);
-            rt.clientPed = null;
+    const step = this.currentStep();
+    if (!step) return;
+    const car = this.game.currentCar();
+
+    if (step.kind === 'reach') {
+      const t = this._landmark(step.target);
+      const d = Math.hypot(p.x - t.x, p.z - t.z);
+      if (d < (step.radius || 12)) this._advance();
+    } else if (step.kind === 'deliver') {
+      if (car) {
+        const t = this._landmark(step.target);
+        const cp = { x: car.group.position.x, z: car.group.position.z };
+        if (Math.hypot(cp.x - t.x, cp.z - t.z) < (step.radius || 14)) {
+          if (this.clientAboard) {
+            // The client gets out at the marina.
+            const client = this.props.find((pr) => pr.kind === 'client');
+            if (client) {
+              client.group.visible = true;
+              client.group.position.set(t.x + 2, 0, t.z + 2);
+            }
+            this.clientAboard = false;
           }
           this._advance();
         }
-        break;
       }
-      case 'enterCar': {
-        if (ctx.inCar) this._advance();
-        break;
+    } else if (step.kind === 'defeat') {
+      this.spawned = this.spawned.filter((e) => this.game.combat.enemies.includes(e));
+      if (this.spawned.length === 0) this._advance();
+    } else if (step.kind === 'wait') {
+      const t = this._landmark(step.target);
+      const d = Math.hypot(p.x - t.x, p.z - t.z);
+      if (d < (step.radius || 12)) {
+        this.waitLeft -= dt;
+        if (this.waitLeft <= 0) this._advance();
       }
-      case 'stealCar': {
-        if (ctx.inCar && ctx.car === rt.targetCar) {
-          if (this.game) this.game.toast('Stolen. Get it to the docks.', 2600);
-          this._advance();
-        }
-        break;
-      }
-      case 'fight': {
-        // Completion is driven by onEnemyKilled; nothing to poll here.
-        break;
-      }
-      case 'collect': {
-        const pt = this._pointOf(step);
-        if (this._distTo(pp, pt) <= step.radius) {
-          if (rt.itemMesh) {
-            this.scene.remove(rt.itemMesh);
-            rt.itemMesh = null;
-          }
-          if (this.sfx) this.sfx.pickup();
-          this._advance();
-        }
-        break;
-      }
-      case 'wait': {
-        const pt = this._pointOf(step);
-        if (this._distTo(pp, pt) <= step.radius) {
-          rt.timer += dt;
-          if (rt.timer >= step.seconds) this._advance();
-        }
-        break;
-      }
-      case 'drops': {
-        const key = step.points[rt.subIndex];
-        const base = LAND(this.city, key);
-        if (this._distTo(pp, base) <= step.radius) {
-          if (this.sfx) this.sfx.pickup();
-          rt.subIndex += 1;
-          this._makeBeacon(step);
-          if (rt.subIndex >= step.points.length) this._advance();
-        }
-        break;
-      }
-      default:
-        break;
     }
   }
 
-  // HUD: title / objective / distance (metres) to the current target.
-  getHUD(playerPos) {
-    const a = this.active;
-    if (!a) {
-      if (this.index >= MISSION_DEFS.length) {
-        return { title: 'STORY COMPLETE — SOLMAR', objective: 'You own this city, Daz.', distance: null };
-      }
-      return {
-        title: 'FREE ROAM — SOLMAR',
-        objective: 'Work waits at the safehouse — follow the yellow marker',
-        distance: null,
-      };
+  _refreshBeacon() {
+    const t = this.targetPos();
+    if (t) {
+      this.beacon.position.set(t.x, 0, t.z);
+      this.beacon.visible = true;
+    } else {
+      this.beacon.visible = false;
     }
-    const step = a.def.steps[a.stepIndex];
-    let objective = step.text;
-    if (step.type === 'wait') {
-      const left = Math.max(0, Math.ceil(step.seconds - a.runtime.timer));
-      objective = `${step.text}… ${left}s`;
-    }
-    if (step.type === 'drops') {
-      objective = `${step.text} (${a.runtime.subIndex}/${step.points.length})`;
-    }
-    if (step.type === 'fight' && a.runtime.fightRemaining > 0) {
-      objective = `${step.text} (${a.runtime.fightRemaining} left)`;
-    }
-    const target = this._stepTarget(step);
-    const distance = target && playerPos ? this._distTo(playerPos, target) : null;
-    return {
-      title: `${a.def.id.toUpperCase()} — ${a.def.title}`,
-      objective,
-      distance,
-    };
   }
 
-  // Where a new job starts: the safehouse beacon.
-  get startPoint() {
-    return LAND(this.city, 'safehouse');
-  }
-
-  // Current beacon target for the HUD minimap ({x, z} or null).
-  getTarget() {
-    const a = this.active;
-    if (!a) return null;
-    return this._stepTarget(a.def.steps[a.stepIndex]);
+  // Distance from the player to the current objective, for the HUD.
+  distanceToTarget() {
+    const t = this.targetPos();
+    if (!t) return null;
+    const p = this.game.playerPos();
+    if (!p) return null;
+    return Math.hypot(p.x - t.x, p.z - t.z);
   }
 }

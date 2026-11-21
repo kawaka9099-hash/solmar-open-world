@@ -1,285 +1,225 @@
 // Solmar — game/src/combat.js
-// Pistol + fists, armed enemies, and cash pickups. Shooting is hitscan
-// from the PLAYER'S EYE toward the crosshair's world point — the previous
-// build fired the ray from the high chase camera and it passed over
-// nearby targets' heads — and the scene graph is refreshed with
-// updateMatrixWorld before every raycast, because freshly spawned
-// enemies otherwise raycast as ghosts at the origin.
+// Combat for Solmar: the player's pistol and fists, armed enemies who shoot
+// back, and cash pickups. Hitscan shooting uses a raycaster from the camera
+// through the crosshair; the scene matrices are refreshed first, or the ray
+// tests ghosts at the origin (a real bug from an earlier build).
 
-import { CONFIG } from './config.js';
-import { makeRng } from './util.js';
-import { createPlayer, updatePlayer, setPedFleeing } from './actors.js';
+import { clamp, angleDiff, makeRng } from './util.js';
 
-const ENEMY_DEFS = {
-  thug: { health: 100, damage: 10, shootRange: 30, hitChance: 0.22, marker: 0xff4030 },
-  guard: { health: 120, damage: 12, shootRange: 34, hitChance: 0.26, marker: 0xff8020 },
-  hale: { health: 260, damage: 16, shootRange: 38, hitChance: 0.3, marker: 0xffd020 },
+export const PISTOL = {
+  magSize: 12,
+  reserveStart: 48,
+  damage: 34,
+  range: 120,
+  fireInterval: 0.22,
 };
 
-export class CombatSystem {
-  constructor(scene, camera, THREE, city, hooks = {}) {
+export const PUNCH = {
+  damage: 12,
+  range: 2.8,
+  arc: 1.9, // radians of facing cone
+  cooldown: 0.45,
+};
+
+const ENEMY_DEFS = {
+  thug: { health: 60, speed: 2.4, color: 0x8a2a20, fireInterval: 2.1, damage: 7, cash: 25, range: 26 },
+  guard: { health: 100, speed: 2.8, color: 0x2a344a, fireInterval: 1.7, damage: 8, cash: 40, range: 30 },
+  hale: { health: 170, speed: 3.1, color: 0x1a1a1a, fireInterval: 1.3, damage: 10, cash: 150, range: 32 },
+};
+
+function enemyMesh(THREE, kind, def) {
+  const g = new THREE.Group();
+  const mat = (c) => new THREE.MeshLambertMaterial({ color: c });
+  const torso = new THREE.Mesh(new THREE.BoxGeometry(0.62, 0.78, 0.36), mat(def.color));
+  torso.position.y = 1.05;
+  const head = new THREE.Mesh(new THREE.BoxGeometry(0.34, 0.34, 0.34), mat(0xe8b88a));
+  head.position.y = 1.62;
+  const legL = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.7, 0.26), mat(0x2a344a));
+  legL.position.set(-0.16, 0.35, 0);
+  const legR = legL.clone();
+  legR.position.x = 0.16;
+  const gun = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.1, 0.5), mat(0x111111));
+  gun.position.set(0.3, 1.1, 0.3);
+  g.add(torso, head, legL, legR, gun);
+  g.traverse((m) => { m.castShadow = false; });
+  return g;
+}
+
+export class Combat {
+  constructor(scene, THREE, city, hooks) {
     this.scene = scene;
-    this.camera = camera;
     this.THREE = THREE;
     this.city = city;
-    this.sfx = hooks.sfx ?? null;
-    this.onCrime = hooks.onCrime ?? (() => {});
-    this.onEnemyKilled = hooks.onEnemyKilled ?? (() => {});
-    this.onPickup = hooks.onPickup ?? (() => {});
-    this.rng = makeRng(0xc0ffee);
-    this.ammoMag = CONFIG.combat.pistolMag;
-    this.ammoReserve = CONFIG.combat.pistolReserve;
-    this.fireTimer = 0;
-    this.reloadTimer = 0;
-    this.punchTimer = 0;
+    this.hooks = hooks || {}; // { onCrime(kind), onPlayerHit(dmg), onKill(kind) }
+    this.enemies = []; // { kind, def, health, group, x, z, heading, fireTimer, walkPhase }
+    this.pickups = []; // { group, x, z, amount }
+    this.tracers = []; // { line, life }
+    this.rng = makeRng(424242);
+    this.raycaster = new THREE.Raycaster();
+    this.raycaster.far = PISTOL.range;
+  }
+
+  clear() {
+    for (const e of this.enemies) this.scene.remove(e.group);
+    for (const p of this.pickups) this.scene.remove(p.group);
+    for (const t of this.tracers) this.scene.remove(t.line);
     this.enemies = [];
     this.pickups = [];
     this.tracers = [];
-    this.peds = [];
-    this.ctx = null; // latest frame context from update()
-    this._raycaster = new THREE.Raycaster();
-    this._center = new THREE.Vector2(0, 0);
   }
 
-  setPeds(peds) {
-    this.peds = peds;
-  }
-
-  spawnEnemy(kind, x, z, health = null) {
-    const def = ENEMY_DEFS[kind] ?? ENEMY_DEFS.thug;
-    const actor = createPlayer(this.scene, this.THREE, x, z);
-    const markerGeo = new this.THREE.OctahedronGeometry(0.35);
-    const markerMat = new this.THREE.MeshBasicMaterial({ color: def.marker });
-    const marker = new this.THREE.Mesh(markerGeo, markerMat);
-    marker.position.set(x, 2.4, z);
-    this.scene.add(marker);
+  spawnEnemy(kind, x, z) {
+    const def = ENEMY_DEFS[kind] || ENEMY_DEFS.thug;
+    const group = enemyMesh(this.THREE, kind, def);
+    group.position.set(x, 0, z);
     const enemy = {
-      kind,
-      def,
-      actor,
-      health: health ?? def.health,
-      maxHealth: health ?? def.health,
-      marker,
-      shootTimer: 0.8 + this.rng() * 1.2,
-      dead: false,
+      kind, def, health: def.health, group,
+      x, z, heading: this.rng() * Math.PI * 2,
+      fireTimer: 1 + this.rng(), walkPhase: this.rng() * 6,
     };
+    group.traverse((m) => { m.userData.enemyRef = enemy; });
+    this.scene.add(group);
     this.enemies.push(enemy);
     return enemy;
   }
 
-  removeEnemy(enemy) {
+  _dropCash(x, z, amount) {
+    const g = new this.THREE.Group();
+    const box = new this.THREE.Mesh(
+      new this.THREE.BoxGeometry(0.5, 0.1, 0.35),
+      new this.THREE.MeshLambertMaterial({ color: 0x20c860 }),
+    );
+    box.position.y = 0.25;
+    const band = new this.THREE.Mesh(
+      new this.THREE.BoxGeometry(0.52, 0.12, 0.1),
+      new this.THREE.MeshLambertMaterial({ color: 0xe8b820 }),
+    );
+    band.position.y = 0.25;
+    g.add(box, band);
+    g.position.set(x, 0, z);
+    this.scene.add(g);
+    this.pickups.push({ group: g, x, z, amount });
+  }
+
+  _tracer(from, to) {
+    const geo = new this.THREE.BufferGeometry().setFromPoints([from, to]);
+    const line = new this.THREE.Line(geo, new this.THREE.LineBasicMaterial({
+      color: 0xffe080, transparent: true, opacity: 0.9,
+    }));
+    this.scene.add(line);
+    this.tracers.push({ line, life: 0.09 });
+  }
+
+  // Fire the pistol. origin/direction are THREE.Vector3. targets is a list
+  // of { mesh, kind: 'enemy'|'ped', ref } the ray may hit. Returns the hit
+  // ({ kind, ref, point, distance }) or null. Ammo is the caller's job.
+  shoot(origin, direction, targets) {
+    this.scene.updateMatrixWorld(true);
+    this.raycaster.set(origin, direction);
+    const meshes = [];
+    for (const t of targets) {
+      t.mesh.traverse((m) => { if (m.isMesh) meshes.push(m); });
+    }
+    const hits = this.raycaster.intersectObjects(meshes, false);
+    const end = origin.clone().add(direction.clone().multiplyScalar(PISTOL.range));
+    if (hits.length === 0) {
+      this._tracer(origin, end);
+      return null;
+    }
+    const hit = hits[0];
+    this._tracer(origin, hit.point);
+    // Walk up to the object that carries the target reference.
+    let obj = hit.object;
+    let ref = null;
+    let kind = null;
+    while (obj) {
+      if (obj.userData.enemyRef) { ref = obj.userData.enemyRef; kind = 'enemy'; break; }
+      if (obj.userData.pedRef) { ref = obj.userData.pedRef; kind = 'ped'; break; }
+      obj = obj.parent;
+    }
+    if (!ref) return { kind: 'wall', point: hit.point, distance: hit.distance };
+    if (kind === 'enemy') {
+      ref.health -= PISTOL.damage;
+      if (ref.health <= 0) this._killEnemy(ref);
+    }
+    return { kind, ref, point: hit.point, distance: hit.distance };
+  }
+
+  _killEnemy(enemy) {
     const i = this.enemies.indexOf(enemy);
     if (i >= 0) this.enemies.splice(i, 1);
-    this.scene.remove(enemy.actor.group);
-    this.scene.remove(enemy.marker);
-    enemy.dead = true;
+    this.scene.remove(enemy.group);
+    this._dropCash(enemy.x, enemy.z, enemy.def.cash);
+    if (this.hooks.onKill) this.hooks.onKill(enemy.kind);
   }
 
-  clearEnemies() {
-    for (const e of [...this.enemies]) this.removeEnemy(e);
-  }
-
-  spawnPickup(x, z) {
-    const amount = CONFIG.money.pickupCashMin + Math.floor(this.rng() * (CONFIG.money.pickupCashMax - CONFIG.money.pickupCashMin + 1));
-    const geo = new this.THREE.BoxGeometry(0.7, 0.25, 0.5);
-    const mat = new this.THREE.MeshBasicMaterial({ color: 0x37c978 });
-    const mesh = new this.THREE.Mesh(geo, mat);
-    mesh.position.set(x, 0.5, z);
-    this.scene.add(mesh);
-    this.pickups.push({ mesh, amount, age: 0 });
-  }
-
-  _shootTargets() {
-    const out = [];
-    for (const e of this.enemies) out.push({ root: e.actor.group, enemy: e, ped: null });
-    for (const ped of this.peds) out.push({ root: ped.group, enemy: null, ped });
-    return out;
-  }
-
-  tryShoot() {
-    if (this.fireTimer > 0 || this.reloadTimer > 0) return false;
-    if (this.ammoMag <= 0) {
-      this.startReload();
-      return false;
+  // A fist swing. player = { x, z, heading }. Returns the enemy hit or null.
+  punch(player) {
+    for (const e of [...this.enemies]) {
+      const dx = e.x - player.x;
+      const dz = e.z - player.z;
+      const d = Math.hypot(dx, dz);
+      if (d > PUNCH.range) continue;
+      const want = Math.atan2(dx, dz);
+      if (Math.abs(angleDiff(player.heading, want)) > PUNCH.arc / 2) continue;
+      e.health -= PUNCH.damage;
+      if (e.health <= 0) this._killEnemy(e);
+      return e;
     }
-    const ctx = this.ctx;
-    if (!ctx) return false;
-    this.fireTimer = CONFIG.combat.pistolFireInterval;
-    this.ammoMag -= 1;
-    if (this.sfx) this.sfx.gunshot();
-    this.onCrime('shootGun');
+    return null;
+  }
 
-    // Refresh world matrices first: a freshly spawned enemy's meshes sit
-    // at the origin until the next render, and the ray would test ghosts.
-    this.scene.updateMatrixWorld(true);
-
-    // 1. Where is the crosshair pointing? Ray from the camera through
-    //    the screen centre; the first enemy hit there is the aim point,
-    //    otherwise a point 30 m out along the ray.
-    this._raycaster.setFromCamera(this._center, this.camera);
-    this._raycaster.far = CONFIG.combat.pistolRange;
-    const targets = this._shootTargets();
-    const meshes = [];
-    for (const t of targets) meshes.push(t.root);
-    const camHits = this._raycaster.intersectObjects(meshes, true);
-    let aimPoint;
-    if (camHits.length > 0) {
-      aimPoint = camHits[0].point;
-    } else {
-      aimPoint = this._raycaster.ray.at(30, new this.THREE.Vector3());
-    }
-
-    // 2. Fire from the player's eye toward that point, and test enemies
-    //    (and peds) with the eye ray — never with the camera ray.
-    const eye = new this.THREE.Vector3(ctx.playerPos.x, ctx.playerPos.y + 1.5, ctx.playerPos.z);
-    const dir = aimPoint.clone().sub(eye).normalize();
-    this._raycaster.set(eye, dir);
-    this._raycaster.far = CONFIG.combat.pistolRange;
-    const hits = this._raycaster.intersectObjects(meshes, true);
-    let endPoint = eye.clone().add(dir.clone().multiplyScalar(CONFIG.combat.pistolRange));
-    if (hits.length > 0) {
-      const hit = hits[0];
-      endPoint = hit.point.clone();
-      let node = hit.object;
-      while (node && !targets.some((t) => t.root === node)) node = node.parent;
-      const target = node ? targets.find((t) => t.root === node) : null;
-      if (target?.enemy) this._damageEnemy(target.enemy, CONFIG.combat.pistolDamage);
-      else if (target?.ped) {
-        setPedFleeing(target.ped, true);
-        this.onCrime('assaultPed');
+  // dt seconds. player = { x, z, heading, onFoot }. Collect pickups within
+  // 2 m and let enemies close in and shoot back.
+  update(dt, player) {
+    // Pickups spin and get collected.
+    for (let i = this.pickups.length - 1; i >= 0; i--) {
+      const p = this.pickups[i];
+      p.group.rotation.y += dt * 3;
+      if (Math.hypot(p.x - player.x, p.z - player.z) < 2.2) {
+        this.scene.remove(p.group);
+        this.pickups.splice(i, 1);
+        if (this.hooks.onPickup) this.hooks.onPickup(p.amount);
       }
     }
-    this._addTracer(eye, endPoint);
-    if (this.ammoMag <= 0) this.startReload();
-    return true;
-  }
-
-  _damageEnemy(enemy, dmg) {
-    enemy.health -= dmg;
-    if (enemy.health <= 0 && !enemy.dead) {
-      this.spawnPickup(enemy.actor.pos.x, enemy.actor.pos.z);
-      this.onEnemyKilled(enemy);
-      this.removeEnemy(enemy);
-    }
-  }
-
-  tryPunch() {
-    if (this.punchTimer > 0) return false;
-    const ctx = this.ctx;
-    if (!ctx) return false;
-    this.punchTimer = 0.45;
-    if (this.sfx) this.sfx.punch();
-    const facing = { x: Math.sin(ctx.playerHeading), z: Math.cos(ctx.playerHeading) };
-    let best = null; // { kind: 'enemy'|'ped', ref, dist }
-    const consider = (kind, ref, x, z) => {
-      const dx = x - ctx.playerPos.x;
-      const dz = z - ctx.playerPos.z;
-      const d = Math.hypot(dx, dz);
-      if (d > CONFIG.combat.punchRange) return;
-      if (best && d >= best.dist) return;
-      const dot = (dx * facing.x + dz * facing.z) / Math.max(d, 0.001);
-      if (dot < 0.3) return;
-      best = { kind, ref, dist: d, dx, dz };
-    };
-    for (const e of this.enemies) consider('enemy', e, e.actor.pos.x, e.actor.pos.z);
-    for (const ped of this.peds) consider('ped', ped, ped.pos.x, ped.pos.z);
-    if (best?.kind === 'enemy') {
-      const hitEnemy = best.ref;
-      this._damageEnemy(hitEnemy, CONFIG.combat.punchDamage);
-      // Shove the enemy away from the player.
-      const d = Math.max(0.5, best.dist);
-      hitEnemy.actor.pos.x += (best.dx / d) * 0.7;
-      hitEnemy.actor.pos.z += (best.dz / d) * 0.7;
-      this.city.resolveCircle(hitEnemy.actor.pos, 0.55);
-    } else if (best?.kind === 'ped') {
-      setPedFleeing(best.ref, true);
-      this.onCrime('assaultPed');
-    }
-    return true;
-  }
-
-  startReload() {
-    if (this.reloadTimer > 0 || this.ammoReserve <= 0 || this.ammoMag >= CONFIG.combat.pistolMag) return;
-    this.reloadTimer = 0.9;
-    if (this.sfx) this.sfx.reload();
-  }
-
-  _finishReload() {
-    const need = CONFIG.combat.pistolMag - this.ammoMag;
-    const take = Math.min(need, this.ammoReserve);
-    this.ammoMag += take;
-    this.ammoReserve -= take;
-  }
-
-  _addTracer(from, to) {
-    const geo = new this.THREE.BufferGeometry().setFromPoints([from, to]);
-    const mat = new this.THREE.LineBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.9 });
-    const line = new this.THREE.Line(geo, mat);
-    this.scene.add(line);
-    this.tracers.push({ line, age: 0 });
-  }
-
-  update(dt, ctx) {
-    this.ctx = ctx;
-    this.fireTimer = Math.max(0, this.fireTimer - dt);
-    this.punchTimer = Math.max(0, this.punchTimer - dt);
-    if (this.reloadTimer > 0) {
-      this.reloadTimer -= dt;
-      if (this.reloadTimer <= 0) this._finishReload();
-    }
-
-    // Tracers fade out fast.
-    for (const t of [...this.tracers]) {
-      t.age += dt;
-      t.line.material.opacity = Math.max(0, 0.9 - t.age * 9);
-      if (t.age > 0.12) {
+    // Tracers fade fast.
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      const t = this.tracers[i];
+      t.life -= dt;
+      t.line.material.opacity = Math.max(0, t.life / 0.09) * 0.9;
+      if (t.life <= 0) {
         this.scene.remove(t.line);
         t.line.geometry.dispose();
-        t.line.material.dispose();
-        this.tracers.splice(this.tracers.indexOf(t), 1);
+        this.tracers.splice(i, 1);
       }
     }
-
-    // Cash pickups bob; walking over one collects it.
-    for (const pk of [...this.pickups]) {
-      pk.age += dt;
-      pk.mesh.position.y = 0.5 + Math.sin(pk.age * 4) * 0.12;
-      pk.mesh.rotation.y += dt * 2;
-      const d = Math.hypot(pk.mesh.position.x - ctx.playerPos.x, pk.mesh.position.z - ctx.playerPos.z);
-      if (d < 1.6 && !ctx.inCar) {
-        this.scene.remove(pk.mesh);
-        this.pickups.splice(this.pickups.indexOf(pk), 1);
-        if (this.sfx) this.sfx.pickup();
-        this.onPickup(pk.amount);
-      }
-    }
-
-    // Enemy AI: close to shooting range, then stand off and fire with
-    // shaky aim. Enemies never shoot a fast-moving car.
-    const inCar = !!ctx.inCar;
-    const carSpeed = Math.abs(ctx.carSpeed ?? 0);
+    // Enemies: close in, stop at range, shoot back with shaky aim.
     for (const e of [...this.enemies]) {
-      const p = e.actor.pos;
-      const dx = ctx.playerPos.x - p.x;
-      const dz = ctx.playerPos.z - p.z;
-      const dist = Math.hypot(dx, dz);
-      const heading = Math.atan2(dx, dz);
-      e.marker.position.set(p.x, 2.4 + Math.sin(ctx.time * 3 + p.x) * 0.12, p.z);
-      if (dist > 40) continue;
-      if (dist > 11) {
-        updatePlayer(e.actor, { forward: 1, strafe: 0, heading, sprint: false, jump: false }, dt, this.city);
-      } else {
-        e.actor.heading = heading;
-        updatePlayer(e.actor, { forward: 0, strafe: 0, heading, sprint: false, jump: false }, dt, this.city);
+      const dx = player.x - e.x;
+      const dz = player.z - e.z;
+      const d = Math.hypot(dx, dz);
+      const want = Math.atan2(dx, dz);
+      e.heading = want;
+      e.group.rotation.y = want;
+      if (d > 13) {
+        const step = e.def.speed * dt;
+        e.x += Math.sin(want) * step;
+        e.z += Math.cos(want) * step;
+        const p = { x: e.x, z: e.z };
+        this.city.resolveCircle(p, 0.6);
+        e.x = p.x;
+        e.z = p.z;
+        e.walkPhase += dt * 7;
       }
-      e.shootTimer -= dt;
-      const canShoot = dist <= e.def.shootRange && (!inCar || (carSpeed < 5 && dist < 15));
-      if (canShoot && e.shootTimer <= 0) {
-        e.shootTimer = 1.1 + this.rng() * 1.1;
-        if (this.rng() < e.def.hitChance) {
-          ctx.damagePlayer(e.def.damage * (0.7 + this.rng() * 0.6));
+      e.group.position.set(e.x, Math.abs(Math.sin(e.walkPhase)) * 0.05, e.z);
+      e.fireTimer -= dt;
+      // Enemies shoot back at an on-foot player in range; a car is cover.
+      if (player.onFoot && d < e.def.range && e.fireTimer <= 0) {
+        e.fireTimer = e.def.fireInterval * (0.8 + this.rng() * 0.5);
+        // Shaky aim: roughly half the shots land.
+        if (this.rng() < 0.55 && this.hooks.onPlayerHit) {
+          this.hooks.onPlayerHit(e.def.damage);
         }
-        if (this.sfx && dist < 40) this.sfx.gunshot();
       }
     }
   }
