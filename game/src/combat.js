@@ -1,181 +1,145 @@
-// Combat: the player's pistol and fists, the Rivas crew's thugs, bullets, and the
-// health and ammo pickups scattered around Solmar. Nothing here draws anything;
-// render.js paints bullets, muzzle flashes and enemies from this state.
-import { COMBAT, PICKUPS } from './config.js';
-import { range } from './random.js';
+// Solmar combat: pistol fire (raycast from the camera), melee punches,
+// tracers and explosions. Targets are any object with a `group` (a three.js
+// Object3D) and a `hitRadius`; the raycaster walks up from the mesh it hits
+// to find the owner through userData.
 
-export function createCombat(city, random) {
-  const bullets = []; // {x, y, vx, vy, life, fromPlayer, damage}
-  const enemies = []; // thugs: {x, y, angle, health, shootTimer, strafe}
-  const pickups = []; // {kind: 'health'|'ammo', x, y, timer}
-  let muzzle = 0; // seconds left of the player's muzzle flash
+import * as THREE from 'three';
+import { PLAYER } from './config.js';
+import { dist2D } from './util.js';
 
-  function spawnThugs(x, y) {
-    enemies.length = 0;
-    for (let i = 0; i < 5; i += 1) {
-      const angle = (i / 5) * Math.PI * 2;
-      enemies.push({
-        x: x + Math.cos(angle) * range(random, 70, 180),
-        y: y + Math.sin(angle) * range(random, 70, 180),
-        angle: 0, health: COMBAT.thugHealth,
-        shootTimer: range(random, 0.5, 1.5), strafe: range(random, -1, 1),
-        hitFlash: 0,
-      });
+export class Combat {
+  constructor(scene) {
+    this.scene = scene;
+    this.raycaster = new THREE.Raycaster();
+    this.tracers = []; // { line, life }
+    this.explosions = []; // { group, life }
+  }
+
+  // Tag a shootable's group so hits can be traced back to it.
+  static tag(target) {
+    if (target.group) target.group.userData.combatTarget = target;
+  }
+
+  // Fire from the shooter's chest along a level aim direction. The ray
+  // starts at the player, not at the camera: the camera sits metres above
+  // the player's head and looks down at them, so a ray cast from the
+  // camera through the screen centre dives under any target more than
+  // ~10m away. The aim direction is horizontal (camYaw); the camera's
+  // pitch only moves the view, since every target is on foot.
+  shoot(origin, direction, targets) {
+    this.raycaster.set(origin, direction);
+    this.raycaster.far = PLAYER.PISTOL_RANGE;
+    const meshes = [];
+    for (const t of targets) {
+      if (t.dead || t.wrecked) continue;
+      if (t.group) meshes.push(t.group);
     }
+    const hits = this.raycaster.intersectObjects(meshes, true);
+    const from = origin.clone();
+    let hitTarget = null;
+    let hitPoint = null;
+    if (hits.length > 0) {
+      const first = hits[0];
+      hitPoint = first.point.clone();
+      let obj = first.object;
+      while (obj) {
+        if (obj.userData.combatTarget) {
+          hitTarget = obj.userData.combatTarget;
+          break;
+        }
+        obj = obj.parent;
+      }
+    }
+    if (!hitPoint) {
+      hitPoint = from.clone().add(this.raycaster.ray.direction.clone().multiplyScalar(PLAYER.PISTOL_RANGE));
+    }
+    this.spawnTracer(from, hitPoint);
+    return { target: hitTarget, point: hitPoint };
   }
 
-  function spawnPickups() {
-    // Health and ammo at fixed, memorable spots around the city.
-    const spots = [
-      { kind: 'health', x: 1120, y: 1760 }, { kind: 'health', x: 3160, y: 1440 },
-      { kind: 'health', x: 640, y: 1440 }, { kind: 'ammo', x: 1840, y: 640 },
-      { kind: 'ammo', x: 2640, y: 1840 }, { kind: 'ammo', x: 420, y: 2500 },
-      { kind: 'health', x: 240, y: 640 }, { kind: 'ammo', x: 1440, y: 2240 },
-    ];
-    for (const s of spots) pickups.push({ ...s, timer: 0 });
-  }
-
-  function fireBullet(state, x, y, angle, fromPlayer) {
-    const speed = 780;
-    bullets.push({
-      x: x + Math.cos(angle) * 18, y: y + Math.sin(angle) * 18,
-      vx: Math.cos(angle) * speed, vy: Math.sin(angle) * speed,
-      life: COMBAT.pistolRange / speed, fromPlayer, damage: fromPlayer ? COMBAT.pistolDamage : COMBAT.thugDamage,
-    });
-    if (fromPlayer) muzzle = 0.07;
-    state.audioCue = 'shot';
-  }
-
-  function playerShoot(state, targetX, targetY) {
-    const p = state.player;
-    if (p.car || !p.hasPistol || p.ammo <= 0 || p.shootCooldown > 0) return false;
-    p.ammo -= 1;
-    p.shootCooldown = 0.28;
-    const angle = Math.atan2(targetY - p.y, targetX - p.x);
-    p.angle = angle;
-    fireBullet(state, p.x, p.y, angle, true);
-    return true;
-  }
-
-  function playerMelee(state) {
-    const p = state.player;
-    if (p.car || p.meleeTimer > 0) return;
-    p.meleeTimer = 0.45;
-    p.meleeSwing = 0.45;
-    state.audioCue = 'melee';
-    // Hit enemies and pedestrians in front of the player.
-    for (const e of enemies) {
-      const d = Math.hypot(e.x - p.x, e.y - p.y);
-      if (d > COMBAT.meleeRange) continue;
-      let diff = Math.atan2(e.y - p.y, e.x - p.x) - p.angle;
+  // A punch in front of the attacker: everything within range and a wide
+  // forward arc takes damage and is knocked back.
+  melee(attackerPos, heading, targets, damage = PLAYER.PUNCH_DAMAGE) {
+    const hit = [];
+    for (const t of targets) {
+      if (t.dead || t.wrecked || !t.pos) continue;
+      const d = dist2D(attackerPos.x, attackerPos.z, t.pos.x, t.pos.z);
+      if (d > PLAYER.PUNCH_RANGE) continue;
+      const ang = Math.atan2(t.pos.x - attackerPos.x, t.pos.z - attackerPos.z);
+      let diff = ang - heading;
       while (diff > Math.PI) diff -= Math.PI * 2;
       while (diff < -Math.PI) diff += Math.PI * 2;
-      if (Math.abs(diff) < COMBAT.meleeArc) damageEnemy(state, e, COMBAT.meleeDamage);
+      if (Math.abs(diff) > 1.1) continue;
+      hit.push(t);
+      // Knockback away from the attacker.
+      const kx = Math.sin(ang);
+      const kz = Math.cos(ang);
+      t.pos.x += kx * 1.2;
+      t.pos.z += kz * 1.2;
+      if (t.group) t.group.position.copy(t.pos);
     }
+    return hit;
   }
 
-  function damageEnemy(state, enemy, amount) {
-    enemy.health -= amount;
-    enemy.hitFlash = 0.15;
-    if (enemy.health <= 0) {
-      enemy.dead = true;
-      state.audioCue = 'thugDown';
-      state.missions.onEvent(state, 'thugDown');
-      state.cash += 50; // pocket cash off the crew
-    }
+  spawnTracer(from, to) {
+    const geo = new THREE.BufferGeometry().setFromPoints([from, to]);
+    const line = new THREE.Line(
+      geo,
+      new THREE.LineBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.95 }),
+    );
+    this.scene.add(line);
+    this.tracers.push({ line, life: 0.09 });
   }
 
-  function update(state, dt) {
-    const p = state.player;
-    if (p.shootCooldown > 0) p.shootCooldown -= dt;
-    if (p.meleeTimer > 0) p.meleeTimer -= dt;
-    if (p.meleeSwing > 0) p.meleeSwing -= dt;
-    if (muzzle > 0) muzzle -= dt;
+  // A fireball that grows and fades, plus a rising smoke puff.
+  spawnExplosion(x, z) {
+    const group = new THREE.Group();
+    group.position.set(x, 1.2, z);
+    const fire = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 12, 10),
+      new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.95 }),
+    );
+    const core = new THREE.Mesh(
+      new THREE.SphereGeometry(0.6, 10, 8),
+      new THREE.MeshBasicMaterial({ color: 0xffe9a8, transparent: true, opacity: 0.95 }),
+    );
+    const smoke = new THREE.Mesh(
+      new THREE.SphereGeometry(1.4, 10, 8),
+      new THREE.MeshLambertMaterial({ color: 0x2a2a2a, transparent: true, opacity: 0.55 }),
+    );
+    smoke.position.y = 2.2;
+    group.add(fire, core, smoke);
+    this.scene.add(group);
+    this.explosions.push({ group, fire, core, smoke, life: 0.8 });
+  }
 
-    // Bullets fly, hit buildings, thugs, the player, or pedestrians.
-    for (const b of bullets) {
-      b.x += b.vx * dt;
-      b.y += b.vy * dt;
-      b.life -= dt;
-      if (b.life <= 0) { b.dead = true; continue; }
-      if (city.buildingAt(b.x, b.y, 0)) { b.dead = true; continue; }
-      if (b.fromPlayer) {
-        for (const e of enemies) {
-          if (e.dead) continue;
-          if (Math.hypot(e.x - b.x, e.y - b.y) < 16) {
-            damageEnemy(state, e, b.damage);
-            b.dead = true;
-            break;
-          }
-        }
-        if (!b.dead) {
-          for (const ped of state.peds) {
-            if (Math.hypot(ped.x - b.x, ped.y - b.y) < 12) {
-              ped.flee = 2; ped.fleeX = b.x; ped.fleeY = b.y;
-              b.dead = true;
-              break;
-            }
-          }
-        }
-      } else if (Math.hypot(p.x - b.x, p.y - b.y) < 13 && !p.car) {
-        p.health -= b.damage;
-        p.lastDamage = state.elapsed;
-        state.audioCue = 'hurt';
-        b.dead = true;
+  update(dt) {
+    for (let i = this.tracers.length - 1; i >= 0; i--) {
+      const t = this.tracers[i];
+      t.life -= dt;
+      t.line.material.opacity = Math.max(0, t.life / 0.09) * 0.95;
+      if (t.life <= 0) {
+        this.scene.remove(t.line);
+        t.line.geometry.dispose();
+        t.line.material.dispose();
+        this.tracers.splice(i, 1);
       }
     }
-    for (let i = bullets.length - 1; i >= 0; i -= 1) if (bullets[i].dead) bullets.splice(i, 1);
-
-    // Thugs: strafe toward the player and shoot when in range.
-    for (const e of enemies) {
-      if (e.dead) continue;
-      if (e.hitFlash > 0) e.hitFlash -= dt;
-      const dx = p.x - e.x;
-      const dy = p.y - e.y;
-      const d = Math.hypot(dx, dy) || 1;
-      e.angle = Math.atan2(dy, dx);
-      if (d > 130) {
-        e.x += (dx / d) * 95 * dt;
-        e.y += (dy / d) * 95 * dt;
-      } else {
-        e.x += Math.cos(e.angle + Math.PI / 2) * e.strafe * 60 * dt;
-        e.y += Math.sin(e.angle + Math.PI / 2) * e.strafe * 60 * dt;
-      }
-      city.resolveCircle(e, 11);
-      e.shootTimer -= dt;
-      if (e.shootTimer <= 0 && d < COMBAT.thugRange && !p.car) {
-        e.shootTimer = range(random, 0.9, 1.6);
-        const spread = range(random, -0.09, 0.09);
-        fireBullet(state, e.x, e.y, e.angle + spread, false);
-      }
-    }
-    for (let i = enemies.length - 1; i >= 0; i -= 1) if (enemies[i].dead) enemies.splice(i, 1);
-
-    // Pickups: walk over one to take it; they respawn after a while.
-    for (const pk of pickups) {
-      if (pk.timer > 0) {
-        pk.timer -= dt;
-        continue;
-      }
-      if (Math.hypot(p.x - pk.x, p.y - pk.y) < 26 && !p.car) {
-        pk.timer = PICKUPS.respawnSeconds;
-        if (pk.kind === 'health') {
-          p.health = Math.min(100, p.health + PICKUPS.healthAmount);
-          state.message = `+${PICKUPS.healthAmount} health`;
-        } else {
-          p.ammo += PICKUPS.ammoAmount;
-          if (!p.hasPistol) p.hasPistol = true;
-          state.message = `+${PICKUPS.ammoAmount} pistol ammo`;
-        }
-        state.messageTimer = 1.6;
-        state.audioCue = 'pickup';
+    for (let i = this.explosions.length - 1; i >= 0; i--) {
+      const e = this.explosions[i];
+      e.life -= dt;
+      const k = 1 - Math.max(0, e.life / 0.8);
+      const s = 1 + k * 5;
+      e.fire.scale.setScalar(s);
+      e.core.scale.setScalar(1 + k * 2.5);
+      e.fire.material.opacity = Math.max(0, 0.95 * (1 - k));
+      e.core.material.opacity = Math.max(0, 0.95 * (1 - k));
+      e.smoke.position.y = 2.2 + k * 5;
+      e.smoke.material.opacity = Math.max(0, 0.55 * (1 - k * 0.7));
+      if (e.life <= 0) {
+        this.scene.remove(e.group);
+        this.explosions.splice(i, 1);
       }
     }
   }
-
-  return {
-    bullets, enemies, pickups, spawnThugs, spawnPickups,
-    playerShoot, playerMelee, fireBullet, update,
-    get muzzle() { return muzzle; },
-  };
 }

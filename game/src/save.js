@@ -1,23 +1,23 @@
-// Save and load through localStorage: cash, story progress, position, health,
-// wanted level, clock and pistol state. A save is only written from the pause menu
-// and on mission completion, so a bad session never overwrites a good one mid-chase.
-import { SAVE_KEY } from './config.js';
+// Solmar saves: progress, cash, ammo and position in localStorage.
+// Everything is wrapped in try/catch — a browser that refuses storage
+// just plays without saving.
 
-export function saveGame(state) {
+const SAVE_KEY = 'solmar-save-v1';
+
+export function loadSave() {
   try {
-    const data = {
-      v: 1,
-      cash: state.cash,
-      mission: state.missions.serialize(),
-      player: {
-        x: state.player.x, y: state.player.y, angle: state.player.angle,
-        health: state.player.health, hasPistol: state.player.hasPistol,
-        ammo: state.player.ammo,
-      },
-      wanted: state.wanted,
-      clockMinutes: state.clockMinutes,
-      savedAt: Date.now(),
-    };
+    const raw = window.localStorage.getItem(SAVE_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object') return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+export function writeSave(data) {
+  try {
     window.localStorage.setItem(SAVE_KEY, JSON.stringify(data));
     return true;
   } catch {
@@ -25,18 +25,20 @@ export function saveGame(state) {
   }
 }
 
-export function loadGame() {
+export function clearSave() {
   try {
-    const raw = window.localStorage.getItem(SAVE_KEY);
-    if (!raw) return null;
-    const data = JSON.parse(raw);
-    if (!data || data.v !== 1) return null;
-    return data;
-  } catch {
-    return null;
-  }
+    window.localStorage.removeItem(SAVE_KEY);
+  } catch { /* ignore */ }
 }
 
-export function hasSave() {
-  return loadGame() !== null;
+// A one-line summary for the Continue button on the start screen.
+export function saveSummary() {
+  const data = loadSave();
+  if (!data) return null;
+  const when = data.savedAt ? new Date(data.savedAt) : null;
+  return {
+    money: data.money ?? 0,
+    mission: data.nextMission ?? 1,
+    date: when ? when.toLocaleDateString() : '',
+  };
 }

@@ -1,200 +1,264 @@
-// The story: six jobs for fixer Marisol Vega, run as a step machine. Each step has
-// a kind (steal, goto, pickup, grab, lose, shootout, escape) and a target; the game
-// calls update() every frame and advance() when the player does the thing. Rewards
-// are paid in cash, and the mission line is what the HUD's objective panel shows.
-import { COMBAT, MISSIONS, PLACES } from './config.js';
+// Solmar's missions: six story jobs driven by the data in config.js. The
+// runner shows an intro card, plants a light beacon on the current
+// objective, watches the player complete each step (go to, enter a car,
+// deliver, collect, defeat enemies, escape), pays the reward and reports
+// pass or fail back to the game.
 
-export function createMissions() {
-  let index = 0; // which mission of MISSIONS
-  let step = 0; // which step of the mission
-  let timer = 0; // seconds left for a timed step (0 = untimed)
-  let grabTimer = 0; // vault-cracking hold time
-  let failed = false;
-  let done = false; // the whole story is finished
-  let enemiesLeft = 0;
-  let announced = false;
+import * as THREE from 'three';
+import { MISSIONS } from './config.js';
+import { dist2D } from './util.js';
 
-  function current() {
-    return MISSIONS[index] || null;
+// Which step of which mission needs a specific car (by the game's car id).
+const MISSION_CARS = {
+  1: { 0: 'lena' },
+  // The sport is the target for both the steal step and the delivery step:
+  // without the delivery mapping, enterStep clears targetCar and the
+  // deliverCar check (inCar === targetCar) can never pass.
+  2: { 1: 'sport', 2: 'sport' },
+};
+
+export class MissionRunner {
+  constructor(scene) {
+    this.scene = scene;
+    this.active = null;
+    this.completed = new Set();
+    this.beacon = this.makeBeacon();
+    this.beacon.visible = false;
+    scene.add(this.beacon);
+    this.packageMesh = null;
+    this.targetCar = null;
   }
 
-  function currentStep() {
-    const m = current();
-    return m ? m.steps[step] : null;
+  makeBeacon() {
+    const group = new THREE.Group();
+    const beam = new THREE.Mesh(
+      new THREE.CylinderGeometry(2.0, 2.6, 70, 12, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0xffb62e, transparent: true, opacity: 0.22,
+        side: THREE.DoubleSide, depthWrite: false,
+      }),
+    );
+    beam.position.y = 35;
+    const diamond = new THREE.Mesh(
+      new THREE.OctahedronGeometry(1.3),
+      new THREE.MeshBasicMaterial({ color: 0xffb62e }),
+    );
+    diamond.position.y = 7;
+    const ring = new THREE.Mesh(
+      new THREE.RingGeometry(2.4, 3.2, 32),
+      new THREE.MeshBasicMaterial({ color: 0xffb62e, transparent: true, opacity: 0.85, side: THREE.DoubleSide }),
+    );
+    ring.rotation.x = -Math.PI / 2;
+    ring.position.y = 0.15;
+    group.add(beam, diamond, ring);
+    group.userData.diamond = diamond;
+    return group;
   }
 
-  function objective() {
-    const m = current();
-    if (done) return 'Story complete — Solmar is yours. Free roam.';
-    if (!m) return '';
-    const s = currentStep();
-    return s ? s.label : '';
+  // Begin a mission by its 1-based id. Returns its definition.
+  start(id, game) {
+    const def = MISSIONS.find((m) => m.id === id);
+    if (!def) return null;
+    this.abort();
+    this.active = {
+      def,
+      stepIndex: 0,
+      timer: 0,
+      kills: 0,
+      step: null,
+      game,
+    };
+    this.enterStep(game);
+    return def;
   }
 
-  function target() {
-    const s = currentStep();
-    if (!s) return null;
-    if (s.kind === 'steal' || s.kind === 'lose') return null;
-    if (s.x !== undefined) return { x: s.x, y: s.y };
-    return null;
+  abort() {
+    this.active = null;
+    this.beacon.visible = false;
+    this.clearPackage();
+    this.targetCar = null;
   }
 
-  function title() {
-    const m = current();
-    return done ? 'Free Roam' : m ? `Mission ${m.id}: ${m.title}` : '';
-  }
-
-  function start(state) {
-    const m = current();
-    if (!m) return;
-    timer = 0;
-    grabTimer = 0;
-    failed = false;
-    announced = false;
-    // Timed steps arm their clock when the step begins.
-    const s = currentStep();
-    if (s && s.seconds) timer = s.seconds;
-    if (s && s.kind === 'shootout') {
-      // (Re)starting on the shootout step — e.g. a save loaded mid-fight, or a
-      // staged scene — fields a fresh crew; the step ends when they are all down.
-      enemiesLeft = 5;
-      state.spawnThugs = true;
+  clearPackage() {
+    if (this.packageMesh) {
+      this.scene.remove(this.packageMesh);
+      this.packageMesh = null;
     }
-    if (m.id === 5 && !state.player.hasPistol) {
-      state.player.hasPistol = true;
-      state.player.ammo = Math.max(state.player.ammo, COMBAT.pistolAmmo);
-    }
-    state.message = `Mission ${m.id}: ${m.title} — ${m.brief}`;
-    state.messageTimer = 5;
   }
 
-  function advance(state) {
-    const m = current();
-    if (!m) return;
-    step += 1;
-    grabTimer = 0;
-    const s = currentStep();
-    timer = s && s.seconds ? s.seconds : 0;
-    if (step >= m.steps.length) {
-      state.cash += m.reward;
-      state.message = `Job done! Marisol paid you $${m.reward}.`;
-      state.messageTimer = 4;
-      state.audioCue = 'cash';
-      index += 1;
-      step = 0;
-      if (index >= MISSIONS.length) {
-        done = true;
-        state.message = 'The Solmar Heist is done. The city is yours, kid.';
-        state.messageTimer = 6;
-      } else {
-        start(state);
-      }
-      return;
-    }
-    if (s.kind === 'shootout') {
-      enemiesLeft = 5;
-      state.spawnThugs = true;
-    }
-    state.message = s.label;
-    state.messageTimer = 3;
+  currentStep() {
+    return this.active ? this.active.def.steps[this.active.stepIndex] : null;
   }
 
-  function fail(state, reason) {
-    failed = true;
-    state.message = reason;
-    state.messageTimer = 4;
-    // Restart the current mission from its first step.
-    step = 0;
-    timer = 0;
-    grabTimer = 0;
-    state.wanted = Math.max(0, state.wanted - 1);
+  enterStep(game) {
+    const step = this.currentStep();
+    this.active.step = step;
+    this.active.timer = step.time ?? 0;
+    this.active.kills = 0;
+    this.clearPackage();
+    this.targetCar = null;
+    const carId = MISSION_CARS[this.active.def.id]?.[this.active.stepIndex];
+    if (carId) this.targetCar = game.getMissionCar(carId);
+    if (step.type === 'kill') {
+      game.spawnEnemies(step.x, step.z, step.count, this.active.def.id === 6);
+    }
+    if (step.type === 'collect') {
+      const pkg = new THREE.Mesh(
+        new THREE.BoxGeometry(0.9, 0.6, 0.9),
+        new THREE.MeshBasicMaterial({ color: 0xffd24a }),
+      );
+      pkg.position.set(step.x, 0.8, step.z);
+      this.scene.add(pkg);
+      this.packageMesh = pkg;
+    }
+    if (step.wanted) game.wanted.setStars(step.wanted);
+    this.beacon.visible = true;
+    this.moveBeacon(game);
+    game.hud.showObjective(this.active.def, step);
   }
 
-  function update(state, dt) {
-    if (done) return;
-    const m = current();
-    if (!m) return;
-    const s = currentStep();
-    if (!s) return;
-    const p = state.player;
+  // The beacon follows moving targets (a car) and pulses.
+  moveBeacon(game) {
+    const step = this.currentStep();
+    if (!step) return;
+    let x = step.x;
+    let z = step.z;
+    if (this.targetCar && !this.targetCar.wrecked) {
+      x = this.targetCar.pos.x;
+      z = this.targetCar.pos.z;
+    }
+    this.beacon.position.set(x, 0, z);
+  }
 
-    if (timer > 0) {
-      timer -= dt;
-      if (timer <= 0) {
-        fail(state, 'Too slow — the client walked. Marisol is giving you another shot.');
-        start(state);
+  update(dt, game) {
+    if (!this.active) return;
+    const step = this.currentStep();
+    const player = game.player;
+    this.moveBeacon(game);
+    this.beacon.userData.diamond.rotation.y += dt * 2;
+    this.beacon.userData.diamond.position.y = 7 + Math.sin(game.time * 2.2) * 0.6;
+    if (this.packageMesh) {
+      this.packageMesh.rotation.y += dt * 1.5;
+      this.packageMesh.position.y = 0.8 + Math.sin(game.time * 3) * 0.15;
+    }
+
+    // Countdown for timed steps.
+    if (step.time) {
+      this.active.timer -= dt;
+      if (this.active.timer <= 0) {
+        this.fail(game, 'Out of time.');
         return;
       }
     }
 
-    // 'lose' completes when the heat reaches zero.
-    if (s.kind === 'lose' && state.wanted === 0) {
-      advance(state);
+    const px = player.pos.x;
+    const pz = player.pos.z;
+    const inCar = game.playerCar;
+
+    switch (step.type) {
+      case 'goto':
+      case 'driveTo':
+      case 'escape': {
+        const cx = inCar ? inCar.pos.x : px;
+        const cz = inCar ? inCar.pos.z : pz;
+        if (dist2D(cx, cz, step.x, step.z) < step.radius) this.advance(game);
+        break;
+      }
+      case 'enterCar': {
+        if (inCar && inCar === this.targetCar) this.advance(game);
+        break;
+      }
+      case 'deliverCar': {
+        if (this.targetCar && this.targetCar.wrecked) {
+          this.fail(game, 'The car was destroyed.');
+          return;
+        }
+        if (inCar && inCar === this.targetCar && dist2D(inCar.pos.x, inCar.pos.z, step.x, step.z) < step.radius) {
+          this.advance(game);
+        }
+        break;
+      }
+      case 'collect': {
+        if (dist2D(px, pz, step.x, step.z) < step.radius) {
+          this.clearPackage();
+          game.audio.pickup();
+          this.advance(game);
+        }
+        break;
+      }
+      case 'kill': {
+        if (this.active.kills >= step.count) this.advance(game);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  registerKill() {
+    if (!this.active) return;
+    this.active.kills++;
+    const step = this.currentStep();
+    if (step && step.type === 'kill') {
+      const done = Math.min(this.active.kills, step.count);
+      const base = step.text.replace(/\(\d+\/\d+\)/, '').trim();
+      this.active.game?.hud.setObjectiveText(`${base} (${done}/${step.count})`);
+    }
+  }
+
+  advance(game) {
+    this.active.stepIndex++;
+    if (this.active.stepIndex >= this.active.def.steps.length) {
+      this.complete(game);
       return;
     }
-    // 'grab' (the vault) completes after holding still inside the marker.
-    if (s.kind === 'grab') {
-      const d = Math.hypot(p.x - s.x, p.y - s.y);
-      if (d < 60) {
-        grabTimer += dt;
-        if (grabTimer > 3) {
-          state.wanted = Math.max(state.wanted, 4);
-          state.message = 'Vault cracked! RUN — the whole city heard that alarm.';
-          state.messageTimer = 4;
-          advance(state);
-        }
-      } else {
-        grabTimer = Math.max(0, grabTimer - dt * 2);
-      }
+    this.enterStep(game);
+  }
+
+  complete(game) {
+    const def = this.active.def;
+    this.completed.add(def.id);
+    this.abort();
+    game.onMissionPassed(def);
+  }
+
+  fail(game, reason) {
+    const def = this.active.def;
+    this.abort();
+    game.onMissionFailed(def, reason);
+  }
+
+  // Objective text for the HUD, with a live kill count when relevant.
+  objectiveText() {
+    if (!this.active) return null;
+    const step = this.currentStep();
+    if (step.type === 'kill') {
+      const base = step.text.replace(/\(\d+\/\d+\)/, '').trim();
+      return `${base} (${Math.min(this.active.kills, step.count)}/${step.count})`;
     }
+    return step.text;
   }
 
-  /** The player did something the current step was waiting for. */
-  function onEvent(state, event, data) {
-    if (done) return;
-    const s = currentStep();
-    if (!s) return;
-    const p = state.player;
-    if (s.kind === 'steal' && event === 'steal') { advance(state); return; }
-    if (s.kind === 'goto' && event === 'arrive') { advance(state); return; }
-    if (s.kind === 'pickup' && event === 'pickup') { advance(state); return; }
-    if (s.kind === 'escape' && event === 'arrive') { advance(state); return; }
-    if (s.kind === 'shootout') {
-      if (event === 'thugDown') {
-        enemiesLeft -= 1;
-        if (enemiesLeft <= 0) advance(state);
-      }
+  // Distance from the player to the current objective, in metres.
+  distanceTo(playerPos) {
+    if (!this.active) return null;
+    const step = this.currentStep();
+    let x = step.x;
+    let z = step.z;
+    if (this.targetCar && !this.targetCar.wrecked) {
+      x = this.targetCar.pos.x;
+      z = this.targetCar.pos.z;
     }
-    void p;
-    void data;
+    return Math.round(dist2D(playerPos.x, playerPos.z, x, z));
   }
 
-  function serialize() {
-    return { index, step, done };
+  // Minimap blip position, or null when no mission is active.
+  blip() {
+    if (!this.active) return null;
+    const step = this.currentStep();
+    if (this.targetCar && !this.targetCar.wrecked) {
+      return { x: this.targetCar.pos.x, z: this.targetCar.pos.z };
+    }
+    return { x: step.x, z: step.z };
   }
-
-  function restore(data) {
-    index = data.index || 0;
-    step = data.step || 0;
-    done = !!data.done;
-    timer = 0;
-    grabTimer = 0;
-    failed = false;
-  }
-
-  return {
-    current, currentStep, objective, target, title, start, advance, fail, update,
-    onEvent, serialize, restore,
-    get index() { return index; },
-    get step() { return step; },
-    get timer() { return timer; },
-    get grabTimer() { return grabTimer; },
-    get done() { return done; },
-    get failed() { return failed; },
-    get enemiesLeft() { return enemiesLeft; },
-    get announced() { return announced; },
-    set announced(v) { announced = v; },
-  };
 }
-
-export { PLACES };
