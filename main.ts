@@ -5,14 +5,13 @@
 //
 // Usage: node main.ts            (writes to $MAKEFUN_OUTPUT_DIR or /output)
 
-import { cpSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { buildDossier } from './vendor/makefun-game.ts';
 
 const repo = resolve(import.meta.dirname);
 const out = process.env.MAKEFUN_OUTPUT_DIR || '/output';
 
-rmSync(out, { recursive: true, force: true });
 mkdirSync(out, { recursive: true });
 
 const gameDir = join(repo, 'game');
